@@ -22,3 +22,4 @@ RepoSync 是一个面向单管理员的 Git 镜像同步管理台，首版目标
 - [数据模型](./docs/data-model.md)
 - [API 设计](./docs/api.md)
 - [开发里程碑](./docs/roadmap.md)
+- [部署说明](./docs/deployment.md)

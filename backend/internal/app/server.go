@@ -29,11 +29,12 @@ import (
 )
 
 type Server struct {
-	http      *http.Server
-	mux       *http.ServeMux
-	store     *store.Store
-	service   *service.Service
-	scheduler *scheduler.Scheduler
+	http            *http.Server
+	mux             *http.ServeMux
+	store           *store.Store
+	service         *service.Service
+	scheduler       *scheduler.Scheduler
+	frontendDistDir string
 }
 
 var executionStreamUpgrader = websocket.Upgrader{
@@ -49,10 +50,11 @@ func NewServer(cfg Config) (*Server, error) {
 	svc := service.New(dbStore, cfg.CacheDir, git.NewClient(cfg.GitBin), scm.NewManager())
 	sched := scheduler.New(svc)
 	server := &Server{
-		mux:       http.NewServeMux(),
-		store:     dbStore,
-		service:   svc,
-		scheduler: sched,
+		mux:             http.NewServeMux(),
+		store:           dbStore,
+		service:         svc,
+		scheduler:       sched,
+		frontendDistDir: cfg.FrontendDistDir,
 	}
 	if tasks, err := svc.ListTasks(context.Background()); err == nil {
 		if err := sched.LoadTasks(tasks); err != nil {
@@ -99,7 +101,10 @@ func (s *Server) routes() {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		distDir := filepath.Join("..", "frontend", "dist")
+		distDir := s.frontendDistDir
+		if strings.TrimSpace(distDir) == "" {
+			distDir = filepath.Join("..", "frontend", "dist")
+		}
 		if _, err := os.Stat(filepath.Join(distDir, "index.html")); err == nil {
 			http.FileServer(http.Dir(distDir)).ServeHTTP(w, r)
 			return

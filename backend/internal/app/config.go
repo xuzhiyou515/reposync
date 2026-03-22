@@ -3,20 +3,22 @@ package app
 import "os"
 
 type Config struct {
-	HTTPAddr  string
-	DBPath    string
-	CacheDir  string
-	SecretKey string
-	GitBin    string
+	HTTPAddr        string
+	DBPath          string
+	CacheDir        string
+	SecretKey       string
+	GitBin          string
+	FrontendDistDir string
 }
 
 func LoadConfigFromEnv() Config {
 	return Config{
-		HTTPAddr:  getenv("REPOSYNC_HTTP_ADDR", ":8080"),
-		DBPath:    getenv("REPOSYNC_DB_PATH", "data/reposync.db"),
-		CacheDir:  getenv("REPOSYNC_CACHE_DIR", "data/cache"),
-		SecretKey: getenv("REPOSYNC_SECRET_KEY", "reposync-dev-secret"),
-		GitBin:    getenv("REPOSYNC_GIT_BIN", "git"),
+		HTTPAddr:        getenv("REPOSYNC_HTTP_ADDR", ":8080"),
+		DBPath:          getenv("REPOSYNC_DB_PATH", "data/reposync.db"),
+		CacheDir:        getenv("REPOSYNC_CACHE_DIR", "data/cache"),
+		SecretKey:       getenv("REPOSYNC_SECRET_KEY", "reposync-dev-secret"),
+		GitBin:          getenv("REPOSYNC_GIT_BIN", "git"),
+		FrontendDistDir: getenv("REPOSYNC_FRONTEND_DIST", "../frontend/dist"),
 	}
 }
 
