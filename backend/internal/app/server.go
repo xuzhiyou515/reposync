@@ -418,9 +418,6 @@ func (s *Server) handleExecutionStream(w http.ResponseWriter, r *http.Request, i
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
 	lastSignature := ""
 	writeDetail := func(detail domain.ExecutionDetail) error {
 		payload, signature, err := executionStreamPayload(detail)
@@ -438,12 +435,16 @@ func (s *Server) handleExecutionStream(w http.ResponseWriter, r *http.Request, i
 		return nil
 	}
 
-	detail, err := s.service.ExecutionDetail(r.Context(), id)
+	detail, updates, cancel, err := s.service.SubscribeExecution(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	defer cancel()
 	if err := writeDetail(detail); err != nil {
+		return
+	}
+	if updates == nil {
 		return
 	}
 
@@ -454,11 +455,11 @@ func (s *Server) handleExecutionStream(w http.ResponseWriter, r *http.Request, i
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			detail, err = s.service.ExecutionDetail(r.Context(), id)
-			if err != nil {
+		case nextDetail, ok := <-updates:
+			if !ok {
 				return
 			}
+			detail = nextDetail
 			if err := writeDetail(detail); err != nil {
 				return
 			}
@@ -472,9 +473,6 @@ func (s *Server) handleExecutionWebSocket(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer conn.Close()
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
 
 	done := make(chan struct{})
 	go func() {
@@ -500,11 +498,15 @@ func (s *Server) handleExecutionWebSocket(w http.ResponseWriter, r *http.Request
 		return conn.WriteMessage(websocket.TextMessage, payload)
 	}
 
-	detail, err := s.service.ExecutionDetail(r.Context(), id)
+	detail, updates, cancel, err := s.service.SubscribeExecution(r.Context(), id)
 	if err != nil {
 		return
 	}
+	defer cancel()
 	if err := writeDetail(detail); err != nil {
+		return
+	}
+	if updates == nil {
 		return
 	}
 
@@ -517,11 +519,11 @@ func (s *Server) handleExecutionWebSocket(w http.ResponseWriter, r *http.Request
 			return
 		case <-done:
 			return
-		case <-ticker.C:
-			detail, err = s.service.ExecutionDetail(r.Context(), id)
-			if err != nil {
+		case nextDetail, ok := <-updates:
+			if !ok {
 				return
 			}
+			detail = nextDetail
 			if err := writeDetail(detail); err != nil {
 				return
 			}

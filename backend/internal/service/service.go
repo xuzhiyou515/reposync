@@ -22,6 +22,8 @@ type Service struct {
 	store    *store.Store
 	cacheDir string
 	locks    sync.Map
+	running  sync.Map
+	states   sync.Map
 	git      *git.Client
 	scm      *scm.Manager
 }
@@ -83,6 +85,9 @@ func (s *Service) ListExecutions(ctx context.Context, taskID int64) ([]domain.Sy
 }
 
 func (s *Service) ExecutionDetail(ctx context.Context, id int64) (domain.ExecutionDetail, error) {
+	if detail, ok := s.snapshotExecutionDetail(id); ok {
+		return detail, nil
+	}
 	return s.store.GetExecutionDetail(ctx, id)
 }
 
@@ -101,6 +106,107 @@ func taskKey(id int64) string {
 func (s *Service) taskLock(id int64) *sync.Mutex {
 	value, _ := s.locks.LoadOrStore(taskKey(id), &sync.Mutex{})
 	return value.(*sync.Mutex)
+}
+
+func (s *Service) markTaskRunning(id int64) bool {
+	_, loaded := s.running.LoadOrStore(taskKey(id), struct{}{})
+	return !loaded
+}
+
+func (s *Service) clearTaskRunning(id int64) {
+	s.running.Delete(taskKey(id))
+}
+
+func cloneExecutionDetail(detail domain.ExecutionDetail) domain.ExecutionDetail {
+	cloned := detail
+	cloned.Nodes = append([]domain.SyncExecutionNode(nil), detail.Nodes...)
+	return cloned
+}
+
+func (s *Service) registerExecutionState(task domain.SyncTask, execution domain.SyncExecution) {
+	state := &executionState{
+		detail: domain.ExecutionDetail{
+			Execution: execution,
+			Task:      task,
+			Nodes:     []domain.SyncExecutionNode{},
+		},
+		subscribers: map[int]chan domain.ExecutionDetail{},
+	}
+	s.states.Store(execution.ID, state)
+}
+
+func (s *Service) snapshotExecutionDetail(executionID int64) (domain.ExecutionDetail, bool) {
+	value, ok := s.states.Load(executionID)
+	if !ok {
+		return domain.ExecutionDetail{}, false
+	}
+	state := value.(*executionState)
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return cloneExecutionDetail(state.detail), true
+}
+
+func (s *Service) updateExecutionState(executionID int64, mutate func(detail *domain.ExecutionDetail)) {
+	value, ok := s.states.Load(executionID)
+	if !ok {
+		return
+	}
+	state := value.(*executionState)
+	state.mu.Lock()
+	mutate(&state.detail)
+	snapshot := cloneExecutionDetail(state.detail)
+	subscribers := make([]chan domain.ExecutionDetail, 0, len(state.subscribers))
+	for _, subscriber := range state.subscribers {
+		subscribers = append(subscribers, subscriber)
+	}
+	state.mu.Unlock()
+	for _, subscriber := range subscribers {
+		select {
+		case subscriber <- snapshot:
+		default:
+			select {
+			case <-subscriber:
+			default:
+			}
+			select {
+			case subscriber <- snapshot:
+			default:
+			}
+		}
+	}
+}
+
+func (s *Service) dropExecutionState(executionID int64) {
+	s.states.Delete(executionID)
+}
+
+func (s *Service) SubscribeExecution(ctx context.Context, executionID int64) (domain.ExecutionDetail, <-chan domain.ExecutionDetail, func(), error) {
+	if value, ok := s.states.Load(executionID); ok {
+		state := value.(*executionState)
+		state.mu.Lock()
+		state.nextID++
+		subscriptionID := state.nextID
+		ch := make(chan domain.ExecutionDetail, 1)
+		snapshot := cloneExecutionDetail(state.detail)
+		state.subscribers[subscriptionID] = ch
+		state.mu.Unlock()
+		ch <- snapshot
+		cancel := func() {
+			state.mu.Lock()
+			subscriber, exists := state.subscribers[subscriptionID]
+			if exists {
+				delete(state.subscribers, subscriptionID)
+				close(subscriber)
+			}
+			state.mu.Unlock()
+		}
+		return snapshot, ch, cancel, nil
+	}
+	detail, err := s.store.GetExecutionDetail(ctx, executionID)
+	if err != nil {
+		return domain.ExecutionDetail{}, nil, func() {}, err
+	}
+	return detail, nil, func() {}, nil
 }
 
 func buildCacheKey(source, target string) string {
@@ -136,9 +242,18 @@ type syncResult struct {
 	effectiveCommit string
 }
 
+type executionState struct {
+	mu          sync.RWMutex
+	detail      domain.ExecutionDetail
+	subscribers map[int]chan domain.ExecutionDetail
+	nextID      int
+}
+
 type executionLogger struct {
 	store     *store.Store
 	execution *domain.SyncExecution
+	lastFlush time.Time
+	onUpdate  func(domain.SyncExecution)
 }
 
 func (l *executionLogger) log(ctx context.Context, format string, args ...any) {
@@ -151,27 +266,52 @@ func (l *executionLogger) log(ctx context.Context, format string, args ...any) {
 	} else {
 		l.execution.SummaryLog += "\n" + line
 	}
+	if l.onUpdate != nil {
+		l.onUpdate(*l.execution)
+	}
+	now := time.Now().UTC()
+	if l.lastFlush.IsZero() || now.Sub(l.lastFlush) >= 400*time.Millisecond ||
+		strings.Contains(line, "Execution started") ||
+		strings.Contains(line, "Execution failed") ||
+		strings.Contains(line, "Execution completed") {
+		_ = l.store.UpdateExecution(ctx, *l.execution)
+		l.lastFlush = now
+	}
+}
+
+func (l *executionLogger) flush(ctx context.Context) {
+	if l == nil || l.execution == nil {
+		return
+	}
+	if l.onUpdate != nil {
+		l.onUpdate(*l.execution)
+	}
 	_ = l.store.UpdateExecution(ctx, *l.execution)
+	l.lastFlush = time.Now().UTC()
 }
 
 func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.TriggerType) (domain.SyncExecution, error) {
-	lock := s.taskLock(taskID)
-	lock.Lock()
-	defer lock.Unlock()
+	if !s.markTaskRunning(taskID) {
+		return domain.SyncExecution{}, fmt.Errorf("task is already running")
+	}
 
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	if !task.Enabled {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, fmt.Errorf("task is disabled")
 	}
 	sourceCredential, err := s.store.CredentialByOptionalID(ctx, task.SourceCredentialID)
 	if err != nil && err != sql.ErrNoRows {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	targetCredential, err := s.store.CredentialByOptionalID(ctx, task.TargetCredentialID)
 	if err != nil && err != sql.ErrNoRows {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	targetAPICredentialID := task.TargetAPICredentialID
@@ -180,6 +320,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	}
 	targetAPICredential, err := s.store.CredentialByOptionalID(ctx, targetAPICredentialID)
 	if err != nil && err != sql.ErrNoRows {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	submoduleSourceCredentialID := task.SubmoduleSourceCredentialID
@@ -188,6 +329,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	}
 	submoduleSourceCredential, err := s.store.CredentialByOptionalID(ctx, submoduleSourceCredentialID)
 	if err != nil && err != sql.ErrNoRows {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	submoduleTargetCredentialID := task.SubmoduleTargetCredentialID
@@ -196,6 +338,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	}
 	submoduleTargetCredential, err := s.store.CredentialByOptionalID(ctx, submoduleTargetCredentialID)
 	if err != nil && err != sql.ErrNoRows {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	submoduleTargetAPICredentialID := task.SubmoduleTargetAPICredentialID
@@ -204,6 +347,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	}
 	submoduleTargetAPICredential, err := s.store.CredentialByOptionalID(ctx, submoduleTargetAPICredentialID)
 	if err != nil && err != sql.ErrNoRows {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 
@@ -214,13 +358,17 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		SummaryLog:  "",
 	})
 	if err != nil {
+		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, err
 	}
 	logger := &executionLogger{store: s.store, execution: &execution}
+	s.registerExecutionState(task, execution)
+	logger.onUpdate = func(updated domain.SyncExecution) {
+		s.updateExecutionState(execution.ID, func(detail *domain.ExecutionDetail) {
+			detail.Execution = updated
+		})
+	}
 	logger.log(ctx, "Execution started for task %q with trigger %s", task.Name, trigger)
-
-	counters := &executionCounters{}
-	visited := map[string]bool{}
 	rootCredentials := repositoryCredentials{
 		Source:    sourceCredential,
 		TargetGit: targetCredential,
@@ -230,6 +378,27 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		Source:    submoduleSourceCredential,
 		TargetGit: submoduleTargetCredential,
 		TargetAPI: submoduleTargetAPICredential,
+	}
+
+	go s.executeTask(context.Background(), task, trigger, execution, rootCredentials, submoduleCredentials)
+	return execution, nil
+}
+
+func (s *Service) executeTask(ctx context.Context, task domain.SyncTask, trigger domain.TriggerType, execution domain.SyncExecution, rootCredentials repositoryCredentials, submoduleCredentials repositoryCredentials) {
+	defer s.clearTaskRunning(task.ID)
+	defer s.dropExecutionState(execution.ID)
+
+	lock := s.taskLock(task.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	logger := &executionLogger{store: s.store, execution: &execution}
+	counters := &executionCounters{}
+	visited := map[string]bool{}
+	logger.onUpdate = func(updated domain.SyncExecution) {
+		s.updateExecutionState(execution.ID, func(detail *domain.ExecutionDetail) {
+			detail.Execution = updated
+		})
 	}
 	gitClient := s.git.WithLogger(func(format string, args ...any) {
 		logger.log(ctx, format, args...)
@@ -248,13 +417,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		execution.Status = domain.ExecutionStatusSuccess
 		logger.log(ctx, "Execution completed: mirrored %d repositories and auto-created %d targets", counters.repoCount, counters.createdRepoCount)
 	}
-	if err := s.store.UpdateExecution(ctx, execution); err != nil {
-		return domain.SyncExecution{}, err
-	}
-	if runErr != nil {
-		return execution, runErr
-	}
-	return execution, nil
+	logger.flush(ctx)
 }
 
 func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, referenceCommit string, depth int, parentNodeID *int64, currentCredentials repositoryCredentials, submoduleCredentials repositoryCredentials, visited map[string]bool, counters *executionCounters, logger *executionLogger) (syncResult, error) {
@@ -265,7 +428,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	if visited[sourceRepoURL] {
 		counters.failedNodeCount++
 		logger.log(ctx, "Cycle detected while visiting %s", nodeLabel)
-		node, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
+		node, err := s.createExecutionNode(ctx, domain.SyncExecutionNode{
 			ExecutionID:     executionID,
 			ParentNodeID:    parentNodeID,
 			RepoPath:        repoPath,
@@ -281,7 +444,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	visited[sourceRepoURL] = true
 	defer delete(visited, sourceRepoURL)
 
-	node, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
+	node, err := s.createExecutionNode(ctx, domain.SyncExecutionNode{
 		ExecutionID:     executionID,
 		ParentNodeID:    parentNodeID,
 		RepoPath:        repoPath,
@@ -321,7 +484,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		node.Status = domain.ExecutionStatusFailed
 		node.ErrorMessage = createErr.Error()
 		counters.failedNodeCount++
-		_ = s.store.UpdateExecutionNode(ctx, node)
+		_ = s.updateExecutionNode(ctx, node)
 		return syncResult{node: node, effectiveCommit: referenceCommit}, createErr
 	}
 	if autoCreated {
@@ -351,7 +514,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			HealthStatus:     "broken",
 			LastErrorMessage: fetchErr.Error(),
 		})
-		_ = s.store.UpdateExecutionNode(ctx, node)
+		_ = s.updateExecutionNode(ctx, node)
 		return syncResult{node: node, effectiveCommit: referenceCommit}, fetchErr
 	}
 
@@ -379,7 +542,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			counters.failedNodeCount++
 			node.Status = domain.ExecutionStatusFailed
 			node.ErrorMessage = subErr.Error()
-			_ = s.store.UpdateExecutionNode(ctx, node)
+			_ = s.updateExecutionNode(ctx, node)
 			return syncResult{node: node, effectiveCommit: referenceCommit}, subErr
 		}
 		submoduleMapping := map[string]git.SubmoduleRewrite{}
@@ -392,7 +555,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 				node.Status = domain.ExecutionStatusFailed
 				node.ErrorMessage = childErr.Error()
 				node.ReferenceCommit = submodule.Commit
-				_ = s.store.UpdateExecutionNode(ctx, node)
+				_ = s.updateExecutionNode(ctx, node)
 				return childResult, childErr
 			}
 			submoduleMapping[submodule.Path] = git.SubmoduleRewrite{
@@ -408,7 +571,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			node.Status = domain.ExecutionStatusFailed
 			node.ErrorMessage = pushErr.Error()
 			counters.failedNodeCount++
-			_ = s.store.UpdateExecutionNode(ctx, node)
+			_ = s.updateExecutionNode(ctx, node)
 			return syncResult{node: node, effectiveCommit: referenceCommit}, pushErr
 		}
 		logger.log(ctx, "Rewriting submodule pointers for %s", nodeLabel)
@@ -421,12 +584,12 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		if rewriteErr != nil {
 			logger.log(ctx, "Submodule pointer rewrite failed for %s: %v", nodeLabel, rewriteErr)
 			counters.failedNodeCount++
-			_ = s.store.UpdateExecutionNode(ctx, node)
+			_ = s.updateExecutionNode(ctx, node)
 			return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, rewriteErr
 		}
 		logger.log(ctx, "Completed recursive sync for %s in %dms", nodeLabel, node.PushDuration)
 		counters.repoCount++
-		err = s.store.UpdateExecutionNode(ctx, node)
+		err = s.updateExecutionNode(ctx, node)
 		return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, err
 	}
 
@@ -440,13 +603,13 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	if pushErr != nil {
 		logger.log(ctx, "Mirror push failed for %s: %v", nodeLabel, pushErr)
 		counters.failedNodeCount++
-		_ = s.store.UpdateExecutionNode(ctx, node)
+		_ = s.updateExecutionNode(ctx, node)
 		return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, pushErr
 	}
 
 	logger.log(ctx, "Completed sync for %s in %dms", nodeLabel, node.PushDuration)
 	counters.repoCount++
-	err = s.store.UpdateExecutionNode(ctx, node)
+	err = s.updateExecutionNode(ctx, node)
 	return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, err
 }
 
@@ -485,6 +648,33 @@ func errorString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func (s *Service) createExecutionNode(ctx context.Context, node domain.SyncExecutionNode) (domain.SyncExecutionNode, error) {
+	created, err := s.store.CreateExecutionNode(ctx, node)
+	if err != nil {
+		return domain.SyncExecutionNode{}, err
+	}
+	s.updateExecutionState(created.ExecutionID, func(detail *domain.ExecutionDetail) {
+		detail.Nodes = append(detail.Nodes, created)
+	})
+	return created, nil
+}
+
+func (s *Service) updateExecutionNode(ctx context.Context, node domain.SyncExecutionNode) error {
+	if err := s.store.UpdateExecutionNode(ctx, node); err != nil {
+		return err
+	}
+	s.updateExecutionState(node.ExecutionID, func(detail *domain.ExecutionDetail) {
+		for index := range detail.Nodes {
+			if detail.Nodes[index].ID == node.ID {
+				detail.Nodes[index] = node
+				return
+			}
+		}
+		detail.Nodes = append(detail.Nodes, node)
+	})
+	return nil
 }
 
 func resolveEffectiveCommit(referenceCommit string, fallback string, rewritten map[string]string) string {

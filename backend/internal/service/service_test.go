@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"reposync/backend/internal/domain"
 	gitclient "reposync/backend/internal/git"
@@ -83,6 +84,7 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first run failed: %v", err)
 	}
+	first = waitForExecutionCompletion(t, svc, first.ID)
 	if first.Status != domain.ExecutionStatusSuccess {
 		t.Fatalf("expected first execution success, got %s", first.Status)
 	}
@@ -95,6 +97,7 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second run failed: %v", err)
 	}
+	second = waitForExecutionCompletion(t, svc, second.ID)
 	if second.Status != domain.ExecutionStatusSuccess {
 		t.Fatalf("expected second execution success, got %s", second.Status)
 	}
@@ -129,6 +132,89 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if !strings.Contains(detail.Execution.SummaryLog, "git exec: fetch --prune origin +refs/*:refs/*") {
 		t.Fatalf("expected execution summary log to include raw git command output, got:\n%s", detail.Execution.SummaryLog)
 	}
+}
+
+func TestRunTaskSubscriptionReceivesRealtimeLogUpdates(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for integration test")
+	}
+
+	root := t.TempDir()
+	sourceBare := filepath.Join(root, "source.git")
+	targetBare := filepath.Join(root, "target.git")
+	worktree := filepath.Join(root, "work")
+	dbPath := filepath.Join(root, "reposync.db")
+	cacheDir := filepath.Join(root, "cache")
+
+	runGit(t, "", "init", "--bare", sourceBare)
+	runGit(t, "", "init", "--bare", targetBare)
+	runGit(t, "", "clone", sourceBare, worktree)
+	runGit(t, worktree, "config", "user.name", "RepoSync Test")
+	runGit(t, worktree, "config", "user.email", "reposync@example.com")
+	runGit(t, worktree, "checkout", "-b", "main")
+	writeFile(t, filepath.Join(worktree, "README.md"), "main\n")
+	runGit(t, worktree, "add", ".")
+	runGit(t, worktree, "commit", "-m", "init")
+	runGit(t, worktree, "push", "-u", "origin", "main")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, cacheDir, gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                "subscription-updates",
+		SourceRepoURL:       sourceBare,
+		TargetRepoURL:       targetBare,
+		Enabled:             true,
+		RecursiveSubmodules: false,
+		SyncAllRefs:         true,
+		ProviderConfig:      domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	execution, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	initial, updates, cancel, err := svc.SubscribeExecution(context.Background(), execution.ID)
+	if err != nil {
+		t.Fatalf("subscribe execution: %v", err)
+	}
+	defer cancel()
+
+	if !strings.Contains(initial.Execution.SummaryLog, "Execution started") {
+		t.Fatalf("expected initial summary log to contain execution start, got %q", initial.Execution.SummaryLog)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	sawRealtimeUpdate := false
+	for time.Now().Before(deadline) && !sawRealtimeUpdate {
+		select {
+		case detail, ok := <-updates:
+			if !ok {
+				t.Fatal("execution updates channel closed before realtime update arrived")
+			}
+			if strings.Contains(detail.Execution.SummaryLog, "Syncing (root)") ||
+				strings.Contains(detail.Execution.SummaryLog, "Refreshing mirror cache") ||
+				strings.Contains(detail.Execution.SummaryLog, "git exec:") {
+				sawRealtimeUpdate = true
+			}
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	if !sawRealtimeUpdate {
+		t.Fatal("expected subscription to receive realtime execution log updates")
+	}
+
+	waitForExecutionCompletion(t, svc, execution.ID)
 }
 
 func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
@@ -192,6 +278,7 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recursive run failed: %v", err)
 	}
+	execution = waitForExecutionCompletion(t, svc, execution.ID)
 	if execution.Status != domain.ExecutionStatusSuccess {
 		t.Fatalf("expected success, got %s", execution.Status)
 	}
@@ -231,6 +318,7 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second recursive run failed: %v", err)
 	}
+	secondExecution = waitForExecutionCompletion(t, svc, secondExecution.ID)
 	if secondExecution.Status != domain.ExecutionStatusSuccess {
 		t.Fatalf("expected second recursive run success, got %s", secondExecution.Status)
 	}
@@ -317,6 +405,7 @@ func TestRunTaskRewritesGitlinkToMirroredSubmoduleCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run task: %v", err)
 	}
+	execution = waitForExecutionCompletion(t, svc, execution.ID)
 	if execution.Status != domain.ExecutionStatusSuccess {
 		t.Fatalf("expected success, got %s", execution.Status)
 	}
@@ -380,6 +469,23 @@ func writeFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write file %s: %v", path, err)
 	}
+}
+
+func waitForExecutionCompletion(t *testing.T, svc *Service, executionID int64) domain.SyncExecution {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		detail, err := svc.ExecutionDetail(context.Background(), executionID)
+		if err != nil {
+			t.Fatalf("execution detail %d: %v", executionID, err)
+		}
+		if detail.Execution.Status != domain.ExecutionStatusRunning {
+			return detail.Execution
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("execution %d did not finish before timeout", executionID)
+	return domain.SyncExecution{}
 }
 
 func assertGitRef(t *testing.T, repo string, ref string) {

@@ -33,8 +33,15 @@ func New(path string, box *security.SecretBox) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &Store{db: db, box: box}
+	if err := store.configure(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := store.init(); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	return store, nil
@@ -42,6 +49,15 @@ func New(path string, box *security.SecretBox) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+func (s *Store) configure() error {
+	_, err := s.db.Exec(`
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = NORMAL;
+PRAGMA foreign_keys = ON;`)
+	return err
 }
 
 func (s *Store) init() error {
