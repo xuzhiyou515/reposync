@@ -13,6 +13,7 @@ const loading = ref(false)
 const executionTaskId = ref<number | null>(null)
 const expandedNodeIds = ref<Set<number>>(new Set())
 const errorOnly = ref(false)
+const selectedNodeId = ref<number | null>(null)
 
 const emptyTask = (): Partial<SyncTask> => ({
   name: '',
@@ -54,6 +55,31 @@ const taskSummary = computed(() => ({
   recursive: tasks.value.filter((item) => item.recursiveSubmodules).length,
   scheduled: tasks.value.filter((item) => item.triggerConfig.enableSchedule).length,
 }))
+
+const taskFormTriggerCards = computed(() => [
+  {
+    label: 'Schedule',
+    value: taskForm.triggerConfig?.enableSchedule ? taskForm.triggerConfig.cron || '已启用' : '未启用',
+  },
+  {
+    label: 'Webhook',
+    value: taskForm.triggerConfig?.enableWebhook ? (taskForm.triggerConfig.webhookSecret ? '已签名' : '未签名') : '未启用',
+  },
+  {
+    label: 'Branch Filter',
+    value: taskForm.triggerConfig?.branchReference || '未限制',
+  },
+  {
+    label: 'Mirror Scope',
+    value: taskForm.syncAllRefs ? 'all refs' : 'custom',
+  },
+])
+
+const taskFormWebhookPreview = computed(() => {
+  const provider = taskForm.providerConfig?.provider || 'github'
+  const taskId = taskForm.id ?? ':taskId'
+  return `/api/webhooks/${provider}/${taskId}`
+})
 
 type TreeRow = SyncExecutionNode & {
   label: string
@@ -113,6 +139,13 @@ const selectedExecutionStats = computed(() => {
     { label: '失败节点', value: String(nodes.filter((node) => node.status === 'failed').length) },
     { label: '总节点', value: String(nodes.length) },
   ]
+})
+
+const selectedExecutionNode = computed(() => {
+  if (!selectedExecution.value || selectedNodeId.value == null) {
+    return null
+  }
+  return selectedExecution.value.nodes.find((node) => node.id === selectedNodeId.value) ?? null
 })
 
 const loadTasks = async () => {
@@ -198,6 +231,7 @@ const openExecution = async (execution: SyncExecution) => {
   selectedExecution.value = await api.executionDetail(execution.id)
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
   errorOnly.value = false
+  selectedNodeId.value = selectedExecution.value.nodes[0]?.id ?? null
 }
 
 const cleanupCache = async (cache: RepoCache) => {
@@ -259,6 +293,10 @@ const expandAllNodes = () => {
 
 const collapseAllNodes = () => {
   expandedNodeIds.value = new Set()
+}
+
+const selectNode = (nodeId: number) => {
+  selectedNodeId.value = nodeId
 }
 
 onMounted(async () => {
@@ -371,6 +409,21 @@ onMounted(async () => {
                 <el-switch v-model="taskForm.syncAllRefs" active-text="镜像全部 refs" />
                 <el-switch v-model="taskForm.triggerConfig!.enableSchedule" active-text="启用定时" />
                 <el-switch v-model="taskForm.triggerConfig!.enableWebhook" active-text="启用 Webhook" />
+              </div>
+              <div class="task-trigger-preview">
+                <div class="panel-header">
+                  <strong>触发配置预览</strong>
+                  <span class="muted-text mono">{{ taskFormWebhookPreview }}</span>
+                </div>
+                <div class="trigger-grid">
+                  <div v-for="item in taskFormTriggerCards" :key="item.label" class="trigger-card">
+                    <span>{{ item.label }}</span>
+                    <strong class="mono">{{ item.value }}</strong>
+                  </div>
+                </div>
+                <p class="preview-copy">
+                  Webhook 当前只处理 push 事件；如果配置了 Branch Reference，则仅接受匹配该 ref 的请求。
+                </p>
               </div>
               <el-button type="primary" @click="saveTask">保存任务</el-button>
             </el-form>
@@ -591,38 +644,83 @@ onMounted(async () => {
                 </div>
               </div>
 
-              <div class="tree-list">
-                <div v-for="node in executionTreeRows" :key="node.id" class="tree-row">
-                  <div class="tree-left">
-                    <div class="tree-indent" :style="{ '--tree-level': String(node.level) }"></div>
-                    <div class="tree-node">
-                      <div class="tree-title">
-                        <button
-                          v-if="node.hasChildren"
-                          class="tree-toggle"
-                          type="button"
-                          @click="toggleNode(node.id)"
-                        >
-                          {{ node.expanded ? '−' : '+' }}
-                        </button>
-                        <span v-else class="tree-toggle tree-toggle-placeholder">·</span>
-                        <span class="mono">{{ node.label }}</span>
-                        <el-tag size="small" :type="taskStatusType(node.status)">{{ node.status }}</el-tag>
+              <div class="execution-layout">
+                <div class="tree-list">
+                  <div
+                    v-for="node in executionTreeRows"
+                    :key="node.id"
+                    class="tree-row"
+                    :class="{ 'tree-row-active': selectedNodeId === node.id }"
+                    @click="selectNode(node.id)"
+                  >
+                    <div class="tree-left">
+                      <div class="tree-indent" :style="{ '--tree-level': String(node.level) }"></div>
+                      <div class="tree-node">
+                        <div class="tree-title">
+                          <button
+                            v-if="node.hasChildren"
+                            class="tree-toggle"
+                            type="button"
+                            @click.stop="toggleNode(node.id)"
+                          >
+                            {{ node.expanded ? '−' : '+' }}
+                          </button>
+                          <span v-else class="tree-toggle tree-toggle-placeholder">·</span>
+                          <span class="mono">{{ node.label }}</span>
+                          <el-tag size="small" :type="taskStatusType(node.status)">{{ node.status }}</el-tag>
+                        </div>
+                        <div class="tree-meta">
+                          <span>depth {{ node.depth }}</span>
+                          <span>cache {{ node.cacheHit ? 'hit' : 'miss' }}</span>
+                          <span>auto-create {{ node.autoCreated ? 'yes' : 'no' }}</span>
+                          <span>create {{ node.createDurationMs }}ms</span>
+                          <span>fetch {{ node.fetchDurationMs }}ms</span>
+                          <span>push {{ node.pushDurationMs }}ms</span>
+                        </div>
+                        <div class="tree-paths mono">
+                          <div>src: {{ node.sourceRepoUrl }}</div>
+                          <div>dst: {{ node.targetRepoUrl }}</div>
+                          <div v-if="node.referenceCommit">ref: {{ node.referenceCommit }}</div>
+                          <div v-if="node.errorMessage" class="error-text">error: {{ node.errorMessage }}</div>
+                        </div>
                       </div>
-                      <div class="tree-meta">
-                        <span>depth {{ node.depth }}</span>
-                        <span>cache {{ node.cacheHit ? 'hit' : 'miss' }}</span>
-                        <span>auto-create {{ node.autoCreated ? 'yes' : 'no' }}</span>
-                        <span>create {{ node.createDurationMs }}ms</span>
-                        <span>fetch {{ node.fetchDurationMs }}ms</span>
-                        <span>push {{ node.pushDurationMs }}ms</span>
-                      </div>
-                      <div class="tree-paths mono">
-                        <div>src: {{ node.sourceRepoUrl }}</div>
-                        <div>dst: {{ node.targetRepoUrl }}</div>
-                        <div v-if="node.referenceCommit">ref: {{ node.referenceCommit }}</div>
-                        <div v-if="node.errorMessage" class="error-text">error: {{ node.errorMessage }}</div>
-                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="selectedExecutionNode" class="node-detail-card">
+                  <div class="panel-header">
+                    <strong>节点详情</strong>
+                    <el-tag size="small" :type="taskStatusType(selectedExecutionNode.status)">
+                      {{ selectedExecutionNode.status }}
+                    </el-tag>
+                  </div>
+                  <div class="node-detail-grid">
+                    <div class="node-detail-item">
+                      <span>路径</span>
+                      <strong class="mono">{{ selectedExecutionNode.repoPath || '(root)' }}</strong>
+                    </div>
+                    <div class="node-detail-item">
+                      <span>深度</span>
+                      <strong>{{ selectedExecutionNode.depth }}</strong>
+                    </div>
+                    <div class="node-detail-item">
+                      <span>缓存</span>
+                      <strong>{{ selectedExecutionNode.cacheHit ? 'hit' : 'miss' }}</strong>
+                    </div>
+                    <div class="node-detail-item">
+                      <span>自动建仓</span>
+                      <strong>{{ selectedExecutionNode.autoCreated ? 'yes' : 'no' }}</strong>
+                    </div>
+                  </div>
+                  <div class="tree-paths mono">
+                    <div>src: {{ selectedExecutionNode.sourceRepoUrl }}</div>
+                    <div>dst: {{ selectedExecutionNode.targetRepoUrl }}</div>
+                    <div v-if="selectedExecutionNode.referenceCommit">ref: {{ selectedExecutionNode.referenceCommit }}</div>
+                    <div>create: {{ selectedExecutionNode.createDurationMs }}ms</div>
+                    <div>fetch: {{ selectedExecutionNode.fetchDurationMs }}ms</div>
+                    <div>push: {{ selectedExecutionNode.pushDurationMs }}ms</div>
+                    <div v-if="selectedExecutionNode.errorMessage" class="error-text">
+                      error: {{ selectedExecutionNode.errorMessage }}
                     </div>
                   </div>
                 </div>
