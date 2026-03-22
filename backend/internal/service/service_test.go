@@ -193,6 +193,19 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	assertGitRef(t, mainTargetBare, "refs/heads/master")
 	assertGitRef(t, subTargetBare, "refs/heads/master")
 
+	cloneDir := filepath.Join(root, "clone-target")
+	runGitWithEnv(t, "", []string{"GIT_ALLOW_PROTOCOL=file"}, "clone", "--recurse-submodules", mainTargetBare, cloneDir)
+	gitmodulesContent, err := os.ReadFile(filepath.Join(cloneDir, ".gitmodules"))
+	if err != nil {
+		t.Fatalf("read cloned .gitmodules: %v", err)
+	}
+	if !strings.Contains(string(gitmodulesContent), filepath.ToSlash(subTargetBare)) {
+		t.Fatalf("expected cloned .gitmodules to point to mirrored submodule target, got:\n%s", string(gitmodulesContent))
+	}
+	if _, err := os.Stat(filepath.Join(cloneDir, "libs", "core", "sub.txt")); err != nil {
+		t.Fatalf("expected submodule content to be available after recursive clone: %v", err)
+	}
+
 	detail, err := svc.ExecutionDetail(context.Background(), execution.ID)
 	if err != nil {
 		t.Fatalf("execution detail: %v", err)

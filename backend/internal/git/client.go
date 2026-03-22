@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -104,6 +105,56 @@ func (c *Client) ReadSubmodules(ctx context.Context, repoPath string) ([]Submodu
 	return result, nil
 }
 
+func (c *Client) RewriteSubmoduleURLsAndPushBranches(ctx context.Context, cachePath string, targetURL string, mapping map[string]string) (time.Duration, error) {
+	started := time.Now()
+	tempDir, err := os.MkdirTemp("", "reposync-rewrite-*")
+	if err != nil {
+		return 0, err
+	}
+	defer os.RemoveAll(tempDir)
+
+	if _, err := c.run(ctx, "", "clone", cachePath, tempDir); err != nil {
+		return 0, err
+	}
+	if _, err := c.run(ctx, tempDir, "config", "user.name", "RepoSync"); err != nil {
+		return 0, err
+	}
+	if _, err := c.run(ctx, tempDir, "config", "user.email", "reposync@example.com"); err != nil {
+		return 0, err
+	}
+	if _, err := c.run(ctx, tempDir, "remote", "add", "reposync-target", targetURL); err != nil && !strings.Contains(err.Error(), "already exists") {
+		return 0, err
+	}
+
+	branches, err := c.listRemoteBranches(ctx, tempDir)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, branch := range branches {
+		if _, err := c.run(ctx, tempDir, "checkout", "-B", branch, "origin/"+branch); err != nil {
+			return 0, err
+		}
+		changed, err := rewriteGitmodulesFile(filepath.Join(tempDir, ".gitmodules"), mapping)
+		if err != nil {
+			return 0, err
+		}
+		if changed {
+			if _, err := c.run(ctx, tempDir, "add", ".gitmodules"); err != nil {
+				return 0, err
+			}
+			if _, err := c.run(ctx, tempDir, "commit", "-m", "Rewrite submodule URLs for mirror target"); err != nil {
+				return 0, err
+			}
+		}
+		if _, err := c.run(ctx, tempDir, "push", "--force", "reposync-target", "HEAD:refs/heads/"+branch); err != nil {
+			return 0, err
+		}
+	}
+
+	return time.Since(started), nil
+}
+
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	if dir != "" {
@@ -126,6 +177,27 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 func isGitMirror(path string) bool {
 	info, err := os.Stat(filepath.Join(path, "HEAD"))
 	return err == nil && !info.IsDir()
+}
+
+func (c *Client) listRemoteBranches(ctx context.Context, repoPath string) ([]string, error) {
+	out, err := c.run(ctx, repoPath, "for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin")
+	if err != nil {
+		return nil, err
+	}
+	var result []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		branch := strings.TrimSpace(line)
+		if branch == "" || branch == "HEAD" {
+			continue
+		}
+		if !seen[branch] {
+			seen[branch] = true
+			result = append(result, branch)
+		}
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 type submoduleConfig struct {
@@ -156,4 +228,41 @@ func parseGitmodules(content string) []submoduleConfig {
 	}
 	flush()
 	return result
+}
+
+func rewriteGitmodulesFile(path string, mapping map[string]string) (bool, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	lines := strings.Split(string(content), "\n")
+	currentPath := ""
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "[submodule"):
+			currentPath = ""
+		case strings.HasPrefix(trimmed, "path ="):
+			currentPath = strings.TrimSpace(strings.TrimPrefix(trimmed, "path ="))
+		case strings.HasPrefix(trimmed, "url ="):
+			target, ok := mapping[currentPath]
+			if !ok {
+				continue
+			}
+			prefixIndex := strings.Index(line, "url =")
+			if prefixIndex < 0 {
+				prefixIndex = 0
+			}
+			lines[i] = line[:prefixIndex] + "url = " + target
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	return true, os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 }

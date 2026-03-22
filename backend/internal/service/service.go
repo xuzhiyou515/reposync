@@ -261,8 +261,10 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 			_ = s.store.UpdateExecutionNode(ctx, node)
 			return node, subErr
 		}
+		urlMapping := map[string]string{}
 		for _, submodule := range submodules {
 			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.Path)
+			urlMapping[submodule.Path] = childTarget
 			childNode, childErr := s.syncRepository(ctx, executionID, task, submodule.Path, submodule.URL, childTarget, depth+1, &node.ID, targetCredential, visited, counters)
 			if childErr != nil {
 				node.Status = domain.ExecutionStatusFailed
@@ -273,6 +275,28 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 			}
 			_ = childNode
 		}
+		pushDuration, pushErr := s.git.MirrorPush(ctx, cachePath, targetRepoURL)
+		if pushErr != nil {
+			node.PushDuration = pushDuration.Milliseconds()
+			node.Status = domain.ExecutionStatusFailed
+			node.ErrorMessage = pushErr.Error()
+			counters.failedNodeCount++
+			_ = s.store.UpdateExecutionNode(ctx, node)
+			return node, pushErr
+		}
+		rewriteDuration, rewriteErr := s.git.RewriteSubmoduleURLsAndPushBranches(ctx, cachePath, targetRepoURL, urlMapping)
+		node.PushDuration = (pushDuration + rewriteDuration).Milliseconds()
+		node.ReferenceCommit = s.git.ResolveHEAD(ctx, cachePath)
+		node.Status = executionStatus(rewriteErr)
+		node.ErrorMessage = errorString(rewriteErr)
+		if rewriteErr != nil {
+			counters.failedNodeCount++
+			_ = s.store.UpdateExecutionNode(ctx, node)
+			return node, rewriteErr
+		}
+		counters.repoCount++
+		err = s.store.UpdateExecutionNode(ctx, node)
+		return node, err
 	}
 
 	node.ReferenceCommit = s.git.ResolveHEAD(ctx, cachePath)
@@ -298,13 +322,20 @@ func mapSubmoduleTarget(parentTarget string, submodulePath string) string {
 		if flattened == "" {
 			flattened = "submodule"
 		}
-		return base + "-" + flattened + ".git"
+		return normalizeGitTarget(base + "-" + flattened + ".git")
 	}
 	flattened := strings.ReplaceAll(strings.Trim(submodulePath, "/"), "/", "-")
 	if flattened == "" {
 		flattened = "submodule"
 	}
-	return parentTarget + "-" + flattened + ".git"
+	return normalizeGitTarget(parentTarget + "-" + flattened + ".git")
+}
+
+func normalizeGitTarget(target string) string {
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "ssh://") || strings.HasPrefix(target, "git@") {
+		return target
+	}
+	return filepath.ToSlash(target)
 }
 
 func executionStatus(err error) domain.ExecutionStatus {
