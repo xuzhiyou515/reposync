@@ -240,6 +240,113 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	}
 }
 
+func TestRunTaskRewritesGitlinkToMirroredSubmoduleCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for integration test")
+	}
+
+	root := t.TempDir()
+	leafSourceBare := filepath.Join(root, "leaf-source.git")
+	leafTargetBare := filepath.Join(root, "target-main-child-deps-leaf.git")
+	childSourceBare := filepath.Join(root, "child-source.git")
+	childTargetBare := filepath.Join(root, "target-main-child.git")
+	mainSourceBare := filepath.Join(root, "main-source.git")
+	mainTargetBare := filepath.Join(root, "target-main.git")
+	leafWorktree := filepath.Join(root, "leaf-work")
+	childWorktree := filepath.Join(root, "child-work")
+	mainWorktree := filepath.Join(root, "main-work")
+	dbPath := filepath.Join(root, "reposync.db")
+	cacheDir := filepath.Join(root, "cache")
+
+	runGit(t, "", "init", "--bare", leafSourceBare)
+	runGit(t, "", "clone", leafSourceBare, leafWorktree)
+	runGit(t, leafWorktree, "config", "user.name", "RepoSync Test")
+	runGit(t, leafWorktree, "config", "user.email", "reposync@example.com")
+	writeFile(t, filepath.Join(leafWorktree, "leaf.txt"), "leaf\n")
+	runGit(t, leafWorktree, "add", ".")
+	runGit(t, leafWorktree, "commit", "-m", "leaf init")
+	runGit(t, leafWorktree, "push", "-u", "origin", "master")
+
+	runGit(t, "", "init", "--bare", childSourceBare)
+	runGit(t, "", "clone", childSourceBare, childWorktree)
+	runGit(t, childWorktree, "config", "user.name", "RepoSync Test")
+	runGit(t, childWorktree, "config", "user.email", "reposync@example.com")
+	writeFile(t, filepath.Join(childWorktree, "child.txt"), "child\n")
+	runGit(t, childWorktree, "add", ".")
+	runGit(t, childWorktree, "commit", "-m", "child init")
+	runGit(t, childWorktree, "push", "-u", "origin", "master")
+	runGitWithEnv(t, childWorktree, []string{"GIT_ALLOW_PROTOCOL=file"}, "submodule", "add", leafSourceBare, "deps/leaf")
+	runGit(t, childWorktree, "commit", "-am", "add leaf submodule")
+	runGit(t, childWorktree, "push", "origin", "master")
+	sourceChildCommit := gitRevParse(t, childSourceBare, "refs/heads/master")
+
+	runGit(t, "", "init", "--bare", mainSourceBare)
+	runGit(t, "", "clone", mainSourceBare, mainWorktree)
+	runGit(t, mainWorktree, "config", "user.name", "RepoSync Test")
+	runGit(t, mainWorktree, "config", "user.email", "reposync@example.com")
+	writeFile(t, filepath.Join(mainWorktree, "README.md"), "main\n")
+	runGit(t, mainWorktree, "add", ".")
+	runGit(t, mainWorktree, "commit", "-m", "main init")
+	runGit(t, mainWorktree, "push", "-u", "origin", "master")
+	runGitWithEnv(t, mainWorktree, []string{"GIT_ALLOW_PROTOCOL=file"}, "submodule", "add", childSourceBare, "child")
+	runGit(t, mainWorktree, "commit", "-am", "add child submodule")
+	runGit(t, mainWorktree, "push", "origin", "master")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, cacheDir, gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                "rewrite-gitlink",
+		SourceRepoURL:       mainSourceBare,
+		TargetRepoURL:       mainTargetBare,
+		Enabled:             true,
+		RecursiveSubmodules: true,
+		SyncAllRefs:         true,
+		ProviderConfig:      domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	execution, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	if execution.Status != domain.ExecutionStatusSuccess {
+		t.Fatalf("expected success, got %s", execution.Status)
+	}
+
+	mainTargetCommit := gitRevParse(t, mainTargetBare, "refs/heads/master")
+	childTargetCommit := gitRevParse(t, childTargetBare, "refs/heads/master")
+	if childTargetCommit == sourceChildCommit {
+		t.Fatalf("expected child target commit to differ from source commit after nested rewrite")
+	}
+
+	mainTreeEntry := runGit(t, "", "--git-dir", mainTargetBare, "ls-tree", mainTargetCommit, "child")
+	if !strings.Contains(mainTreeEntry, childTargetCommit) {
+		t.Fatalf("expected main target gitlink to point to mirrored child commit %s, got %s", childTargetCommit, mainTreeEntry)
+	}
+
+	cloneDir := filepath.Join(root, "clone-main-target")
+	runGitWithEnv(t, "", []string{"GIT_ALLOW_PROTOCOL=file"}, "clone", "--recurse-submodules", mainTargetBare, cloneDir)
+
+	childGitmodulesContent, err := os.ReadFile(filepath.Join(cloneDir, "child", ".gitmodules"))
+	if err != nil {
+		t.Fatalf("read cloned child .gitmodules: %v", err)
+	}
+	if !strings.Contains(string(childGitmodulesContent), filepath.ToSlash(leafTargetBare)) {
+		t.Fatalf("expected nested child .gitmodules to point to mirrored leaf target, got:\n%s", string(childGitmodulesContent))
+	}
+	if _, err := os.Stat(filepath.Join(cloneDir, "child", "deps", "leaf", "leaf.txt")); err != nil {
+		t.Fatalf("expected nested submodule content to be available after recursive clone: %v", err)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

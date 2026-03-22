@@ -125,6 +125,11 @@ type executionCounters struct {
 	failedNodeCount  int
 }
 
+type syncResult struct {
+	node            domain.SyncExecutionNode
+	effectiveCommit string
+}
+
 type executionLogger struct {
 	store     *store.Store
 	execution *domain.SyncExecution
@@ -177,7 +182,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	gitClient := s.git.WithLogger(func(format string, args ...any) {
 		logger.log(ctx, format, args...)
 	})
-	_, runErr := s.syncRepository(ctx, gitClient, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, 0, nil, targetCredential, visited, counters, logger)
+	_, runErr := s.syncRepository(ctx, gitClient, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, "", 0, nil, targetCredential, visited, counters, logger)
 
 	finished := time.Now().UTC()
 	execution.FinishedAt = &finished
@@ -200,7 +205,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	return execution, nil
 }
 
-func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, depth int, parentNodeID *int64, targetCredential *domain.Credential, visited map[string]bool, counters *executionCounters, logger *executionLogger) (domain.SyncExecutionNode, error) {
+func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, referenceCommit string, depth int, parentNodeID *int64, targetCredential *domain.Credential, visited map[string]bool, counters *executionCounters, logger *executionLogger) (syncResult, error) {
 	nodeLabel := repoPath
 	if nodeLabel == "" {
 		nodeLabel = "(root)"
@@ -209,31 +214,33 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		counters.failedNodeCount++
 		logger.log(ctx, "Cycle detected while visiting %s", nodeLabel)
 		node, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
-			ExecutionID:   executionID,
-			ParentNodeID:  parentNodeID,
-			RepoPath:      repoPath,
-			SourceRepoURL: sourceRepoURL,
-			TargetRepoURL: targetRepoURL,
-			Depth:         depth,
-			Status:        domain.ExecutionStatusFailed,
-			ErrorMessage:  "detected recursive submodule cycle",
+			ExecutionID:     executionID,
+			ParentNodeID:    parentNodeID,
+			RepoPath:        repoPath,
+			SourceRepoURL:   sourceRepoURL,
+			TargetRepoURL:   targetRepoURL,
+			ReferenceCommit: referenceCommit,
+			Depth:           depth,
+			Status:          domain.ExecutionStatusFailed,
+			ErrorMessage:    "detected recursive submodule cycle",
 		})
-		return node, err
+		return syncResult{node: node, effectiveCommit: referenceCommit}, err
 	}
 	visited[sourceRepoURL] = true
 	defer delete(visited, sourceRepoURL)
 
 	node, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
-		ExecutionID:   executionID,
-		ParentNodeID:  parentNodeID,
-		RepoPath:      repoPath,
-		SourceRepoURL: sourceRepoURL,
-		TargetRepoURL: targetRepoURL,
-		Depth:         depth,
-		Status:        domain.ExecutionStatusRunning,
+		ExecutionID:     executionID,
+		ParentNodeID:    parentNodeID,
+		RepoPath:        repoPath,
+		SourceRepoURL:   sourceRepoURL,
+		TargetRepoURL:   targetRepoURL,
+		ReferenceCommit: referenceCommit,
+		Depth:           depth,
+		Status:          domain.ExecutionStatusRunning,
 	})
 	if err != nil {
-		return domain.SyncExecutionNode{}, err
+		return syncResult{}, err
 	}
 	logger.log(ctx, "Syncing %s from %s to %s", nodeLabel, sourceRepoURL, targetRepoURL)
 
@@ -249,7 +256,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		cacheHit = true
 		hitCount = existing.HitCount + 1
 	} else if getErr != nil && getErr != sql.ErrNoRows {
-		return node, getErr
+		return syncResult{node: node, effectiveCommit: referenceCommit}, getErr
 	}
 
 	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, targetRepoURL, task.ProviderConfig, targetCredential)
@@ -263,7 +270,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		node.ErrorMessage = createErr.Error()
 		counters.failedNodeCount++
 		_ = s.store.UpdateExecutionNode(ctx, node)
-		return node, createErr
+		return syncResult{node: node, effectiveCommit: referenceCommit}, createErr
 	}
 	if autoCreated {
 		counters.createdRepoCount++
@@ -293,7 +300,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			LastErrorMessage: fetchErr.Error(),
 		})
 		_ = s.store.UpdateExecutionNode(ctx, node)
-		return node, fetchErr
+		return syncResult{node: node, effectiveCommit: referenceCommit}, fetchErr
 	}
 
 	_ = s.store.UpsertCache(ctx, domain.RepoCache{
@@ -321,23 +328,25 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			node.Status = domain.ExecutionStatusFailed
 			node.ErrorMessage = subErr.Error()
 			_ = s.store.UpdateExecutionNode(ctx, node)
-			return node, subErr
+			return syncResult{node: node, effectiveCommit: referenceCommit}, subErr
 		}
-		urlMapping := map[string]string{}
+		submoduleMapping := map[string]git.SubmoduleRewrite{}
 		for _, submodule := range submodules {
 			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.Path)
-			urlMapping[submodule.Path] = childTarget
 			logger.log(ctx, "Discovered submodule %s -> %s", submodule.Path, childTarget)
-			childNode, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, depth+1, &node.ID, targetCredential, visited, counters, logger)
+			childResult, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, submodule.Commit, depth+1, &node.ID, targetCredential, visited, counters, logger)
 			if childErr != nil {
 				logger.log(ctx, "Submodule sync failed for %s: %v", submodule.Path, childErr)
 				node.Status = domain.ExecutionStatusFailed
 				node.ErrorMessage = childErr.Error()
 				node.ReferenceCommit = submodule.Commit
 				_ = s.store.UpdateExecutionNode(ctx, node)
-				return childNode, childErr
+				return childResult, childErr
 			}
-			_ = childNode
+			submoduleMapping[submodule.Path] = git.SubmoduleRewrite{
+				URL:    childTarget,
+				Commit: childResult.effectiveCommit,
+			}
 		}
 		logger.log(ctx, "Pushing mirrored refs for %s", nodeLabel)
 		pushDuration, pushErr := gitClient.MirrorPush(ctx, cachePath, targetRepoURL)
@@ -348,27 +357,29 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			node.ErrorMessage = pushErr.Error()
 			counters.failedNodeCount++
 			_ = s.store.UpdateExecutionNode(ctx, node)
-			return node, pushErr
+			return syncResult{node: node, effectiveCommit: referenceCommit}, pushErr
 		}
-		logger.log(ctx, "Rewriting .gitmodules URLs for %s", nodeLabel)
-		rewriteDuration, rewriteErr := gitClient.RewriteSubmoduleURLsAndPushBranches(ctx, cachePath, targetRepoURL, urlMapping)
+		logger.log(ctx, "Rewriting submodule pointers for %s", nodeLabel)
+		rewriteResult, rewriteDuration, rewriteErr := gitClient.RewriteSubmodulesAndPushBranches(ctx, cachePath, targetRepoURL, submoduleMapping)
 		node.PushDuration = (pushDuration + rewriteDuration).Milliseconds()
-		node.ReferenceCommit = gitClient.ResolveHEAD(ctx, cachePath)
+		sourceHead := gitClient.ResolveHEAD(ctx, cachePath)
+		node.ReferenceCommit = resolveEffectiveCommit(referenceCommit, sourceHead, rewriteResult.SourceToTarget)
 		node.Status = executionStatus(rewriteErr)
 		node.ErrorMessage = errorString(rewriteErr)
 		if rewriteErr != nil {
-			logger.log(ctx, "Submodule URL rewrite failed for %s: %v", nodeLabel, rewriteErr)
+			logger.log(ctx, "Submodule pointer rewrite failed for %s: %v", nodeLabel, rewriteErr)
 			counters.failedNodeCount++
 			_ = s.store.UpdateExecutionNode(ctx, node)
-			return node, rewriteErr
+			return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, rewriteErr
 		}
 		logger.log(ctx, "Completed recursive sync for %s in %dms", nodeLabel, node.PushDuration)
 		counters.repoCount++
 		err = s.store.UpdateExecutionNode(ctx, node)
-		return node, err
+		return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, err
 	}
 
-	node.ReferenceCommit = gitClient.ResolveHEAD(ctx, cachePath)
+	sourceHead := gitClient.ResolveHEAD(ctx, cachePath)
+	node.ReferenceCommit = resolveEffectiveCommit(referenceCommit, sourceHead, nil)
 	logger.log(ctx, "Pushing mirrored refs for %s", nodeLabel)
 	pushDuration, pushErr := gitClient.MirrorPush(ctx, cachePath, targetRepoURL)
 	node.PushDuration = pushDuration.Milliseconds()
@@ -378,13 +389,13 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		logger.log(ctx, "Mirror push failed for %s: %v", nodeLabel, pushErr)
 		counters.failedNodeCount++
 		_ = s.store.UpdateExecutionNode(ctx, node)
-		return node, pushErr
+		return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, pushErr
 	}
 
 	logger.log(ctx, "Completed sync for %s in %dms", nodeLabel, node.PushDuration)
 	counters.repoCount++
 	err = s.store.UpdateExecutionNode(ctx, node)
-	return node, err
+	return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, err
 }
 
 func mapSubmoduleTarget(parentTarget string, submodulePath string) string {
@@ -422,4 +433,21 @@ func errorString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func resolveEffectiveCommit(referenceCommit string, fallback string, rewritten map[string]string) string {
+	if strings.TrimSpace(referenceCommit) != "" {
+		if rewritten != nil {
+			if mapped, ok := rewritten[referenceCommit]; ok && strings.TrimSpace(mapped) != "" {
+				return mapped
+			}
+		}
+		return referenceCommit
+	}
+	if rewritten != nil {
+		if mapped, ok := rewritten[fallback]; ok && strings.TrimSpace(mapped) != "" {
+			return mapped
+		}
+	}
+	return fallback
 }

@@ -27,6 +27,15 @@ type Submodule struct {
 	Commit string
 }
 
+type SubmoduleRewrite struct {
+	URL    string
+	Commit string
+}
+
+type RewriteResult struct {
+	SourceToTarget map[string]string
+}
+
 func NewClient(bin string) *Client {
 	if strings.TrimSpace(bin) == "" {
 		bin = "git"
@@ -118,62 +127,80 @@ func (c *Client) ReadSubmodules(ctx context.Context, repoPath string) ([]Submodu
 	return result, nil
 }
 
-func (c *Client) RewriteSubmoduleURLsAndPushBranches(ctx context.Context, cachePath string, targetURL string, mapping map[string]string) (time.Duration, error) {
+func (c *Client) RewriteSubmodulesAndPushBranches(ctx context.Context, cachePath string, targetURL string, mapping map[string]SubmoduleRewrite) (RewriteResult, time.Duration, error) {
 	started := time.Now()
 	tempDir, err := os.MkdirTemp("", "reposync-rewrite-*")
 	if err != nil {
-		return 0, err
+		return RewriteResult{}, 0, err
 	}
 	defer os.RemoveAll(tempDir)
 
 	if _, err := c.run(ctx, "", "clone", cachePath, tempDir); err != nil {
-		return 0, err
+		return RewriteResult{}, 0, err
 	}
 	if _, err := c.run(ctx, tempDir, "config", "user.name", "RepoSync"); err != nil {
-		return 0, err
+		return RewriteResult{}, 0, err
 	}
 	if _, err := c.run(ctx, tempDir, "config", "user.email", "reposync@example.com"); err != nil {
-		return 0, err
+		return RewriteResult{}, 0, err
 	}
 	if _, err := c.run(ctx, tempDir, "remote", "add", "reposync-target", targetURL); err != nil && !strings.Contains(err.Error(), "already exists") {
-		return 0, err
+		return RewriteResult{}, 0, err
 	}
 
 	branches, err := c.listRemoteBranches(ctx, tempDir)
 	if err != nil {
-		return 0, err
+		return RewriteResult{}, 0, err
 	}
+	result := RewriteResult{SourceToTarget: map[string]string{}}
 
 	for _, branch := range branches {
 		if _, err := c.run(ctx, tempDir, "checkout", "-B", branch, "origin/"+branch); err != nil {
-			return 0, err
+			return RewriteResult{}, 0, err
 		}
+		sourceHeadOut, err := c.run(ctx, tempDir, "rev-parse", "HEAD")
+		if err != nil {
+			return RewriteResult{}, 0, err
+		}
+		sourceHead := strings.TrimSpace(sourceHeadOut)
 		sourceCommitDate, err := c.commitDate(ctx, tempDir, "HEAD")
 		if err != nil {
-			return 0, err
+			return RewriteResult{}, 0, err
 		}
 		changed, err := rewriteGitmodulesFile(filepath.Join(tempDir, ".gitmodules"), mapping)
 		if err != nil {
-			return 0, err
+			return RewriteResult{}, 0, err
 		}
-		if changed {
+		gitlinkChanged, err := c.rewriteGitlinks(ctx, tempDir, mapping)
+		if err != nil {
+			return RewriteResult{}, 0, err
+		}
+		if changed || gitlinkChanged {
 			if _, err := c.run(ctx, tempDir, "add", ".gitmodules"); err != nil {
-				return 0, err
+				if !os.IsNotExist(err) && !strings.Contains(err.Error(), "pathspec '.gitmodules' did not match") {
+					return RewriteResult{}, 0, err
+				}
 			}
 			env := []string{
 				"GIT_AUTHOR_DATE=" + sourceCommitDate,
 				"GIT_COMMITTER_DATE=" + sourceCommitDate,
 			}
 			if _, err := c.runWithEnv(ctx, tempDir, env, "commit", "-m", "Rewrite submodule URLs for mirror target"); err != nil {
-				return 0, err
+				return RewriteResult{}, 0, err
 			}
 		}
+		targetHeadOut, err := c.run(ctx, tempDir, "rev-parse", "HEAD")
+		if err != nil {
+			return RewriteResult{}, 0, err
+		}
+		targetHead := strings.TrimSpace(targetHeadOut)
+		result.SourceToTarget[sourceHead] = targetHead
 		if _, err := c.run(ctx, tempDir, "push", "--force", "reposync-target", "HEAD:refs/heads/"+branch); err != nil {
-			return 0, err
+			return RewriteResult{}, 0, err
 		}
 	}
 
-	return time.Since(started), nil
+	return result, time.Since(started), nil
 }
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
@@ -305,7 +332,40 @@ func parseGitmodules(content string) []submoduleConfig {
 	return result
 }
 
-func rewriteGitmodulesFile(path string, mapping map[string]string) (bool, error) {
+func (c *Client) rewriteGitlinks(ctx context.Context, repoPath string, mapping map[string]SubmoduleRewrite) (bool, error) {
+	changed := false
+	for path, item := range mapping {
+		if strings.TrimSpace(item.Commit) == "" {
+			continue
+		}
+		currentCommit, err := c.submoduleCommit(ctx, repoPath, path)
+		if err != nil {
+			return false, err
+		}
+		if currentCommit == item.Commit {
+			continue
+		}
+		if _, err := c.run(ctx, repoPath, "update-index", "--cacheinfo", "160000", item.Commit, path); err != nil {
+			return false, err
+		}
+		changed = true
+	}
+	return changed, nil
+}
+
+func (c *Client) submoduleCommit(ctx context.Context, repoPath string, submodulePath string) (string, error) {
+	tree, err := c.run(ctx, repoPath, "ls-tree", "HEAD", submodulePath)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(strings.TrimSpace(tree))
+	if len(fields) < 3 {
+		return "", nil
+	}
+	return fields[2], nil
+}
+
+func rewriteGitmodulesFile(path string, mapping map[string]SubmoduleRewrite) (bool, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -328,11 +388,14 @@ func rewriteGitmodulesFile(path string, mapping map[string]string) (bool, error)
 			if !ok {
 				continue
 			}
+			if strings.TrimSpace(target.URL) == "" {
+				continue
+			}
 			prefixIndex := strings.Index(line, "url =")
 			if prefixIndex < 0 {
 				prefixIndex = 0
 			}
-			lines[i] = line[:prefixIndex] + "url = " + target
+			lines[i] = line[:prefixIndex] + "url = " + target.URL
 			changed = true
 		}
 	}
