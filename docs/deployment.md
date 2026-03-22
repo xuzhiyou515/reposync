@@ -107,19 +107,19 @@ chmod +x ./release/run.sh
 
 如果你删除 `release/frontend/dist`，程序仍然可以使用二进制内嵌的前端页面启动。
 
-## 8. ?? Windows ????
+## 8. 注册为 Windows 服务
 
-?????? `release/windows-service.ps1`???? RepoSync ??? Windows ???
+发布包中包含 `release/windows-service.ps1`，可用于把 RepoSync 注册为 Windows 服务。
 
-???? release ??????????? RepoSync ??? Windows ???
+建议先进入 release 目录，再用管理员权限的 PowerShell 安装服务。
 
-??????????
+安装步骤：
 - `release/config/reposync.env`
 - `REPOSYNC_SECRET_KEY`
 - `REPOSYNC_DB_PATH`
 - `REPOSYNC_CACHE_DIR`
 
-???? PowerShell ???
+示例 PowerShell 命令：
 
 ```powershell
 Set-Location .\release
@@ -127,7 +127,7 @@ Set-Location .\release
 .\windows-service.ps1 -Action start
 ```
 
-?????
+常用操作：
 
 ```powershell
 .\windows-service.ps1 -Action status
@@ -136,12 +136,12 @@ Set-Location .\release
 .\windows-service.ps1 -Action uninstall
 ```
 
-???
-- ?????? `RepoSync`
-- ???????? `powershell.exe -> run.ps1 -> reposync.exe` ??
-- `run.ps1` ????? `config/reposync.env`
-- ???????????????
-- ???????????? `-ServiceName` ? `-DisplayName`
+说明：
+- 默认服务名为 `RepoSync`
+- 服务实际通过 `powershell.exe -> run.ps1 -> reposync.exe` 方式启动
+- `run.ps1` 会自动加载 `config/reposync.env`
+- 重建 release 包前建议先停止服务，避免文件占用
+- 如需自定义名称，可在脚本参数中传入 `-ServiceName` 与 `-DisplayName`
 
 ## 6. 反向代理建议
 
@@ -162,14 +162,14 @@ RepoSync 自身会同时提供 API 和前端页面，最简单的部署方式是
 替换新的二进制和前端静态文件后重启即可。
 
 
-??? Windows ?????????????
+如果 Windows 服务启动失败，优先检查以下内容：
 
 ```powershell
 Set-Location .\release
 .\windows-service.ps1 -Action stop
 ```
 
-?????????????
+也可以直接在前台执行发布脚本辅助排查：
 
 ```powershell
 Set-Location .\release

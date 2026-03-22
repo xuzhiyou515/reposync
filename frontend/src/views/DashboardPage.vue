@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import axios from 'axios'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { ElTree } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -12,6 +12,8 @@ const credentials = ref<Credential[]>([])
 const caches = ref<RepoCache[]>([])
 const executions = ref<SyncExecution[]>([])
 const webhookEvents = ref<WebhookEvent[]>([])
+type WorkspaceTab = 'tasks' | 'credentials' | 'caches'
+const activeWorkspaceTab = ref<WorkspaceTab>('tasks')
 const selectedExecution = ref<ExecutionDetail | null>(null)
 const loading = ref(false)
 const taskDialogVisible = ref(false)
@@ -34,6 +36,11 @@ const taskFormRef = ref<FormInstance>()
 const credentialSecretMasked = ref('')
 const credentialSecretOriginal = ref('')
 const credentialSecretDirty = ref(false)
+const workspaceScrollTop = reactive<Record<WorkspaceTab, number>>({
+  tasks: 0,
+  credentials: 0,
+  caches: 0,
+})
 
 const emptyTask = (): Partial<SyncTask> => ({
   id: undefined,
@@ -499,6 +506,14 @@ const handlePageVisibilityChange = () => {
   }
 }
 
+watch(activeWorkspaceTab, async (nextTab, previousTab) => {
+  if (previousTab) {
+    workspaceScrollTop[previousTab] = window.scrollY
+  }
+  await nextTick()
+  window.scrollTo({ top: workspaceScrollTop[nextTab] ?? 0, behavior: 'auto' })
+})
+
 const runTask = async (task: SyncTask) => {
   runningTaskId.value = task.id
   executionDetailVisible.value = true
@@ -868,8 +883,8 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <el-tabs class="workspace-tabs">
-      <el-tab-pane label="任务">
+    <el-tabs v-model="activeWorkspaceTab" class="workspace-tabs">
+      <el-tab-pane label="任务" name="tasks">
         <div class="stack-layout">
           <div class="full-width-layout">
             <el-card shadow="never" class="panel-card panel-card-wide">
@@ -944,7 +959,7 @@ onBeforeUnmount(() => {
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="凭证">
+      <el-tab-pane label="凭证" name="credentials">
         <div class="full-width-layout">
           <el-card shadow="never" class="panel-card panel-card-wide">
             <template #header>
@@ -972,7 +987,7 @@ onBeforeUnmount(() => {
 
             </el-tab-pane>
 
-      <el-tab-pane label="缓存">
+      <el-tab-pane label="缓存" name="caches">
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="panel-header">
