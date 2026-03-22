@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS sync_tasks (
   cache_base_path TEXT NOT NULL DEFAULT '',
   source_credential_id INTEGER,
   target_credential_id INTEGER,
+  target_api_credential_id INTEGER,
   enabled INTEGER NOT NULL,
   recursive_submodules INTEGER NOT NULL,
   sync_all_refs INTEGER NOT NULL,
@@ -133,6 +134,10 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
+	_, err = s.db.Exec(`ALTER TABLE sync_tasks ADD COLUMN target_api_credential_id INTEGER`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
 	return nil
 }
 
@@ -176,6 +181,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	var task domain.SyncTask
 	var srcCredential sql.NullInt64
 	var targetCredential sql.NullInt64
+	var targetAPICredential sql.NullInt64
 	var enabled, recursive, syncAll int
 	var triggerJSON, providerJSON string
 	var createdAt, updatedAt string
@@ -187,7 +193,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	if withLatest {
 		err = row.Scan(
 			&task.ID, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
-			&srcCredential, &targetCredential,
+			&srcCredential, &targetCredential, &targetAPICredential,
 			&enabled, &recursive, &syncAll,
 			&triggerJSON, &providerJSON,
 			&createdAt, &updatedAt,
@@ -196,7 +202,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	} else {
 		err = row.Scan(
 			&task.ID, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
-			&srcCredential, &targetCredential,
+			&srcCredential, &targetCredential, &targetAPICredential,
 			&enabled, &recursive, &syncAll,
 			&triggerJSON, &providerJSON,
 			&createdAt, &updatedAt,
@@ -211,6 +217,9 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	}
 	if targetCredential.Valid {
 		task.TargetCredentialID = &targetCredential.Int64
+	}
+	if targetAPICredential.Valid {
+		task.TargetAPICredentialID = &targetAPICredential.Int64
 	}
 	task.Enabled = enabled == 1
 	task.RecursiveSubmodules = recursive == 1
@@ -243,10 +252,10 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 	if task.ID == 0 {
 		res, err := s.db.ExecContext(ctx, `
 INSERT INTO sync_tasks (
-  name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, target_credential_id,
+  name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, target_credential_id, target_api_credential_id,
   enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.TargetCredentialID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.TargetCredentialID, task.TargetAPICredentialID,
 			boolInt(task.Enabled), boolInt(task.RecursiveSubmodules), boolInt(task.SyncAllRefs),
 			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), timeString(now), timeString(now),
 		)
@@ -257,10 +266,10 @@ INSERT INTO sync_tasks (
 	} else {
 		_, err := s.db.ExecContext(ctx, `
 UPDATE sync_tasks SET
-  name = ?, source_repo_url = ?, target_repo_url = ?, cache_base_path = ?, source_credential_id = ?, target_credential_id = ?,
+  name = ?, source_repo_url = ?, target_repo_url = ?, cache_base_path = ?, source_credential_id = ?, target_credential_id = ?, target_api_credential_id = ?,
   enabled = ?, recursive_submodules = ?, sync_all_refs = ?, trigger_config = ?, provider_config = ?, updated_at = ?
 WHERE id = ?`,
-			task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.TargetCredentialID,
+			task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.TargetCredentialID, task.TargetAPICredentialID,
 			boolInt(task.Enabled), boolInt(task.RecursiveSubmodules), boolInt(task.SyncAllRefs),
 			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), timeString(now), task.ID,
 		)
@@ -274,6 +283,7 @@ WHERE id = ?`,
 func (s *Store) GetTask(ctx context.Context, id int64) (domain.SyncTask, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, target_credential_id,
+target_api_credential_id,
 enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, created_at, updated_at
 FROM sync_tasks WHERE id = ?`, id)
 	return scanTask(row, false)
@@ -282,7 +292,7 @@ FROM sync_tasks WHERE id = ?`, id)
 func (s *Store) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-  t.id, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.target_credential_id,
+  t.id, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.target_credential_id, t.target_api_credential_id,
   t.enabled, t.recursive_submodules, t.sync_all_refs, t.trigger_config, t.provider_config, t.created_at, t.updated_at,
   COALESCE(e.status, ''), e.started_at, COALESCE(e.repo_count, 0), COALESCE(e.created_repo_count, 0)
 FROM sync_tasks t

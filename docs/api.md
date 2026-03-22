@@ -18,6 +18,7 @@
   "targetRepoUrl": "git@gogs.example.com:mirror-org/main.git",
   "sourceCredentialId": 1,
   "targetCredentialId": 2,
+  "targetApiCredentialId": 3,
   "enabled": true,
   "recursiveSubmodules": true,
   "syncAllRefs": true,
@@ -43,6 +44,8 @@
 说明：
 - `syncAllRefs` 首版必须为 `true`
 - 服务端执行时应采用 mirror 语义同步所有分支、标签和其他 refs
+- `targetCredentialId` 用于目标 Git 仓库访问
+- `targetApiCredentialId` 用于目标平台自动建仓；留空时兼容回退到 `targetCredentialId`
 
 ### `DELETE /api/tasks/:id`
 删除任务。

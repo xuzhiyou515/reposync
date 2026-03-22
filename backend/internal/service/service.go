@@ -164,6 +164,14 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	if err != nil && err != sql.ErrNoRows {
 		return domain.SyncExecution{}, err
 	}
+	targetAPICredentialID := task.TargetAPICredentialID
+	if targetAPICredentialID == nil {
+		targetAPICredentialID = task.TargetCredentialID
+	}
+	targetAPICredential, err := s.store.CredentialByOptionalID(ctx, targetAPICredentialID)
+	if err != nil && err != sql.ErrNoRows {
+		return domain.SyncExecution{}, err
+	}
 
 	execution, err := s.store.CreateExecution(ctx, domain.SyncExecution{
 		TaskID:      taskID,
@@ -182,7 +190,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	gitClient := s.git.WithLogger(func(format string, args ...any) {
 		logger.log(ctx, format, args...)
 	})
-	_, runErr := s.syncRepository(ctx, gitClient, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, "", 0, nil, targetCredential, visited, counters, logger)
+	_, runErr := s.syncRepository(ctx, gitClient, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, "", 0, nil, targetCredential, targetAPICredential, visited, counters, logger)
 
 	finished := time.Now().UTC()
 	execution.FinishedAt = &finished
@@ -205,7 +213,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	return execution, nil
 }
 
-func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, referenceCommit string, depth int, parentNodeID *int64, targetCredential *domain.Credential, visited map[string]bool, counters *executionCounters, logger *executionLogger) (syncResult, error) {
+func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, referenceCommit string, depth int, parentNodeID *int64, targetCredential *domain.Credential, targetAPICredential *domain.Credential, visited map[string]bool, counters *executionCounters, logger *executionLogger) (syncResult, error) {
 	nodeLabel := repoPath
 	if nodeLabel == "" {
 		nodeLabel = "(root)"
@@ -259,7 +267,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		return syncResult{node: node, effectiveCommit: referenceCommit}, getErr
 	}
 
-	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, targetRepoURL, task.ProviderConfig, targetCredential)
+	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, targetRepoURL, task.ProviderConfig, targetAPICredential)
 	node.CacheKey = cacheKey
 	node.CacheHit = cacheHit
 	node.AutoCreated = autoCreated
@@ -334,7 +342,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		for _, submodule := range submodules {
 			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.Path)
 			logger.log(ctx, "Discovered submodule %s -> %s", submodule.Path, childTarget)
-			childResult, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, submodule.Commit, depth+1, &node.ID, targetCredential, visited, counters, logger)
+			childResult, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, submodule.Commit, depth+1, &node.ID, targetCredential, targetAPICredential, visited, counters, logger)
 			if childErr != nil {
 				logger.log(ctx, "Submodule sync failed for %s: %v", submodule.Path, childErr)
 				node.Status = domain.ExecutionStatusFailed

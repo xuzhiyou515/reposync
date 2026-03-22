@@ -12,7 +12,8 @@
 | `targetRepoUrl` | string | 目标仓库地址 |
 | `cacheBasePath` | string | 任务级缓存保存根路径；留空时使用默认缓存目录 |
 | `sourceCredentialId` | integer nullable | 源仓库凭证 |
-| `targetCredentialId` | integer nullable | 目标仓库凭证 |
+| `targetCredentialId` | integer nullable | 目标 Git 仓库凭证 |
+| `targetApiCredentialId` | integer nullable | 目标平台 API 凭证；用于自动建仓，留空时回退到 `targetCredentialId` |
 | `enabled` | boolean | 是否启用 |
 | `recursiveSubmodules` | boolean | 是否递归同步子模块 |
 | `triggerConfig` | json | 定时/Webhook 配置 |
@@ -120,6 +121,6 @@
 ## 6. 关系说明
 - 一个 `SyncTask` 有多条 `SyncExecution`
 - 一条 `SyncExecution` 有多条 `SyncExecutionNode`
-- 一个 `SyncTask` 可关联两个 `Credential`
+- 一个 `SyncTask` 可关联多个 `Credential`
 - 多个任务可共享同一 `Credential`
 - 多次执行可共享同一 `RepoCache`

@@ -64,6 +64,7 @@ type SyncTask struct {
 	CacheBasePath          string         `json:"cacheBasePath"`
 	SourceCredentialID     *int64         `json:"sourceCredentialId"`
 	TargetCredentialID     *int64         `json:"targetCredentialId"`
+	TargetAPICredentialID  *int64         `json:"targetApiCredentialId"`
 	Enabled                bool           `json:"enabled"`
 	RecursiveSubmodules    bool           `json:"recursiveSubmodules"`
 	SyncAllRefs            bool           `json:"syncAllRefs"`

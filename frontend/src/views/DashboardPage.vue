@@ -27,6 +27,7 @@ const emptyTask = (): Partial<SyncTask> => ({
   enabled: true,
   recursiveSubmodules: true,
   syncAllRefs: true,
+  targetApiCredentialId: undefined,
   triggerConfig: {
     cron: '0 */30 * * * *',
     webhookSecret: '',
@@ -528,6 +529,12 @@ onBeforeUnmount(() => {
                   </el-select>
                 </el-form-item>
               </div>
+              <el-form-item label="目标平台 API 凭证">
+                <el-select v-model="taskForm.targetApiCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="`api-${item.id}`" :label="item.name" :value="item.id" />
+                </el-select>
+                <div class="field-help">留空时默认回退到“目标凭证”，用于兼容旧任务配置。</div>
+              </el-form-item>
               <div class="two-column">
                 <el-form-item label="目标平台">
                   <el-select v-model="taskForm.providerConfig!.provider">

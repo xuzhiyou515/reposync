@@ -206,6 +206,13 @@ h1 {
   line-height: 1.6;
 }
 
+.field-help {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .log-panel {
   display: grid;
   gap: 12px;
