@@ -122,6 +122,17 @@ h1 {
   flex-wrap: wrap;
 }
 
+.trigger-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.trigger-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .detail-stack {
   display: grid;
   gap: 16px;
@@ -137,6 +148,40 @@ h1 {
 .detail-block p {
   margin: 8px 0 0;
   color: var(--muted);
+}
+
+.status-grid,
+.trigger-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.status-card,
+.trigger-card {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(29, 42, 34, 0.08);
+  background: rgba(243, 247, 241, 0.88);
+}
+
+.status-card span,
+.trigger-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.status-card strong,
+.trigger-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+}
+
+.trigger-panel {
+  display: grid;
+  gap: 16px;
 }
 
 .mono {
@@ -160,14 +205,9 @@ h1 {
   gap: 12px;
 }
 
-.tree-branches {
-  width: 16px;
-  min-width: 16px;
-  border-left: 2px solid rgba(31, 122, 90, 0.18);
-}
-
-.branch-empty {
-  border-left-color: transparent;
+.tree-indent {
+  width: calc(var(--tree-level) * 18px + 8px);
+  min-width: calc(var(--tree-level) * 18px + 8px);
 }
 
 .tree-node {
@@ -181,6 +221,24 @@ h1 {
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.tree-toggle {
+  width: 24px;
+  height: 24px;
+  border: 1px solid rgba(31, 122, 90, 0.2);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.tree-toggle-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(31, 122, 90, 0.5);
 }
 
 .tree-meta {
@@ -210,7 +268,9 @@ h1 {
 
   .content-grid,
   .stats-grid,
-  .two-column {
+  .two-column,
+  .status-grid,
+  .trigger-grid {
     grid-template-columns: 1fr;
   }
 }

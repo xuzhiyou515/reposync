@@ -11,6 +11,8 @@ const executions = ref<SyncExecution[]>([])
 const selectedExecution = ref<ExecutionDetail | null>(null)
 const loading = ref(false)
 const executionTaskId = ref<number | null>(null)
+const expandedNodeIds = ref<Set<number>>(new Set())
+const errorOnly = ref(false)
 
 const emptyTask = (): Partial<SyncTask> => ({
   name: '',
@@ -55,7 +57,9 @@ const taskSummary = computed(() => ({
 
 type TreeRow = SyncExecutionNode & {
   label: string
-  branchClass: string
+  level: number
+  hasChildren: boolean
+  expanded: boolean
 }
 
 const executionTreeRows = computed<TreeRow[]>(() => {
@@ -71,24 +75,44 @@ const executionTreeRows = computed<TreeRow[]>(() => {
   }
 
   const result: TreeRow[] = []
-  const visit = (parentId: number | null, prefix: boolean[]) => {
-    const children = childrenByParent.get(parentId) ?? []
-    children.forEach((node, index) => {
-      const isLast = index === children.length - 1
-      const branchClass = prefix
-        .map((active) => (active ? 'branch-continue' : 'branch-empty'))
-        .join(' ')
-      result.push({
-        ...node,
-        label: node.repoPath || '(root)',
-        branchClass,
-      })
-      visit(node.id, [...prefix, !isLast])
+  const visit = (parentId: number | null, level: number, visible: boolean) => {
+    const children = (childrenByParent.get(parentId) ?? []).sort((left, right) => left.repoPath.localeCompare(right.repoPath))
+    if (!visible) {
+      return
+    }
+    children.forEach((node) => {
+      const nodeChildren = childrenByParent.get(node.id) ?? []
+      const hasChildren = nodeChildren.length > 0
+      const expanded = expandedNodeIds.value.has(node.id)
+      const matchesFilter = !errorOnly.value || node.status === 'failed' || !!node.errorMessage
+      if (matchesFilter) {
+        result.push({
+          ...node,
+          label: node.repoPath || '(root)',
+          level,
+          hasChildren,
+          expanded,
+        })
+      }
+      visit(node.id, level + 1, expanded)
     })
   }
 
-  visit(null, [])
+  visit(null, 0, true)
   return result
+})
+
+const selectedExecutionStats = computed(() => {
+  if (!selectedExecution.value) {
+    return []
+  }
+  const nodes = selectedExecution.value.nodes
+  return [
+    { label: '缓存命中', value: String(nodes.filter((node) => node.cacheHit).length) },
+    { label: '自动建仓', value: String(nodes.filter((node) => node.autoCreated).length) },
+    { label: '失败节点', value: String(nodes.filter((node) => node.status === 'failed').length) },
+    { label: '总节点', value: String(nodes.length) },
+  ]
 })
 
 const loadTasks = async () => {
@@ -172,6 +196,8 @@ const removeCredential = async (credential: Credential) => {
 
 const openExecution = async (execution: SyncExecution) => {
   selectedExecution.value = await api.executionDetail(execution.id)
+  expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
+  errorOnly.value = false
 }
 
 const cleanupCache = async (cache: RepoCache) => {
@@ -191,11 +217,48 @@ const taskTriggerSummary = (task: SyncTask) => {
   return bits.length ? bits.join(' | ') : 'Manual only'
 }
 
+const taskScheduleState = (task: SyncTask) => {
+  if (!task.triggerConfig.enableSchedule) {
+    return '未启用'
+  }
+  return task.triggerConfig.cron || '已启用'
+}
+
+const taskWebhookState = (task: SyncTask) => {
+  if (!task.triggerConfig.enableWebhook) {
+    return '未启用'
+  }
+  return task.triggerConfig.webhookSecret ? '已签名' : '未签名'
+}
+
+const taskBranchState = (task: SyncTask) => task.triggerConfig.branchReference || '未限制'
+
 const taskStatusType = (status?: string) => {
   if (status === 'success') return 'success'
   if (status === 'failed') return 'danger'
   if (status === 'running') return 'warning'
   return 'info'
+}
+
+const toggleNode = (nodeId: number) => {
+  const next = new Set(expandedNodeIds.value)
+  if (next.has(nodeId)) {
+    next.delete(nodeId)
+  } else {
+    next.add(nodeId)
+  }
+  expandedNodeIds.value = next
+}
+
+const expandAllNodes = () => {
+  if (!selectedExecution.value) {
+    return
+  }
+  expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
+}
+
+const collapseAllNodes = () => {
+  expandedNodeIds.value = new Set()
 }
 
 onMounted(async () => {
@@ -331,7 +394,14 @@ onMounted(async () => {
               </el-table-column>
               <el-table-column label="调度 / Webhook" min-width="220">
                 <template #default="{ row }">
-                  <span class="mono muted-text">{{ taskTriggerSummary(row) }}</span>
+                  <div class="trigger-stack">
+                    <span class="mono muted-text">{{ taskTriggerSummary(row) }}</span>
+                    <div class="trigger-tags">
+                      <el-tag size="small" effect="plain">{{ taskScheduleState(row) }}</el-tag>
+                      <el-tag size="small" effect="plain">{{ taskWebhookState(row) }}</el-tag>
+                      <el-tag size="small" effect="plain">ref {{ taskBranchState(row) }}</el-tag>
+                    </div>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="最近执行" width="130">
@@ -485,12 +555,57 @@ onMounted(async () => {
                 </div>
               </div>
 
+              <div class="status-grid">
+                <div v-for="item in selectedExecutionStats" :key="item.label" class="status-card">
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
+
+              <div class="detail-block trigger-panel">
+                <div class="panel-header">
+                  <strong>触发状态面板</strong>
+                  <div class="action-row">
+                    <el-button size="small" @click="expandAllNodes">展开全部</el-button>
+                    <el-button size="small" @click="collapseAllNodes">收起全部</el-button>
+                    <el-switch v-model="errorOnly" active-text="只看失败节点" />
+                  </div>
+                </div>
+                <div class="trigger-grid">
+                  <div class="trigger-card">
+                    <span>Schedule</span>
+                    <strong>{{ taskScheduleState(selectedExecution.task) }}</strong>
+                  </div>
+                  <div class="trigger-card">
+                    <span>Webhook</span>
+                    <strong>{{ taskWebhookState(selectedExecution.task) }}</strong>
+                  </div>
+                  <div class="trigger-card">
+                    <span>Branch Filter</span>
+                    <strong class="mono">{{ taskBranchState(selectedExecution.task) }}</strong>
+                  </div>
+                  <div class="trigger-card">
+                    <span>Mirror Scope</span>
+                    <strong>{{ selectedExecution.task.syncAllRefs ? 'all refs' : 'custom' }}</strong>
+                  </div>
+                </div>
+              </div>
+
               <div class="tree-list">
                 <div v-for="node in executionTreeRows" :key="node.id" class="tree-row">
                   <div class="tree-left">
-                    <div class="tree-branches" :class="node.branchClass"></div>
+                    <div class="tree-indent" :style="{ '--tree-level': String(node.level) }"></div>
                     <div class="tree-node">
                       <div class="tree-title">
+                        <button
+                          v-if="node.hasChildren"
+                          class="tree-toggle"
+                          type="button"
+                          @click="toggleNode(node.id)"
+                        >
+                          {{ node.expanded ? '−' : '+' }}
+                        </button>
+                        <span v-else class="tree-toggle tree-toggle-placeholder">·</span>
                         <span class="mono">{{ node.label }}</span>
                         <el-tag size="small" :type="taskStatusType(node.status)">{{ node.status }}</el-tag>
                       </div>
@@ -498,6 +613,7 @@ onMounted(async () => {
                         <span>depth {{ node.depth }}</span>
                         <span>cache {{ node.cacheHit ? 'hit' : 'miss' }}</span>
                         <span>auto-create {{ node.autoCreated ? 'yes' : 'no' }}</span>
+                        <span>create {{ node.createDurationMs }}ms</span>
                         <span>fetch {{ node.fetchDurationMs }}ms</span>
                         <span>push {{ node.pushDurationMs }}ms</span>
                       </div>
