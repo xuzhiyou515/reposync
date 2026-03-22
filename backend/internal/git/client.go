@@ -6,16 +6,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Client struct {
-	bin string
+	bin  string
+	logf func(format string, args ...any)
 }
 
 type Submodule struct {
@@ -29,6 +32,16 @@ func NewClient(bin string) *Client {
 		bin = "git"
 	}
 	return &Client{bin: bin}
+}
+
+func (c *Client) WithLogger(logf func(format string, args ...any)) *Client {
+	if c == nil {
+		return nil
+	}
+	return &Client{
+		bin:  c.bin,
+		logf: logf,
+	}
 }
 
 func (c *Client) EnsureMirror(ctx context.Context, sourceURL string, cachePath string) (bool, time.Duration, error) {
@@ -175,18 +188,57 @@ func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args 
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	if c.logf != nil {
+		c.logf("git exec: %s", strings.Join(args, " "))
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go c.streamPipe(&wg, "stdout", stdoutPipe, &stdout)
+	go c.streamPipe(&wg, "stderr", stderrPipe, &stderr)
+	waitErr := cmd.Wait()
+	wg.Wait()
+	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error()
+			msg = waitErr.Error()
+		}
+		if c.logf != nil {
+			c.logf("git error: %s", msg)
 		}
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), errors.New(msg))
 	}
+	if c.logf != nil {
+		c.logf("git done: %s", strings.Join(args, " "))
+	}
 	return stdout.String(), nil
+}
+
+func (c *Client) streamPipe(wg *sync.WaitGroup, stream string, pipe io.ReadCloser, out *bytes.Buffer) {
+	defer wg.Done()
+	defer pipe.Close()
+	scanner := bufio.NewScanner(pipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		out.WriteString(line)
+		out.WriteByte('\n')
+		if c.logf != nil && strings.TrimSpace(line) != "" {
+			c.logf("git %s: %s", stream, line)
+		}
+	}
 }
 
 func (c *Client) commitDate(ctx context.Context, repoPath string, rev string) (string, error) {

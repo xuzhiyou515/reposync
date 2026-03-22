@@ -155,7 +155,10 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 
 	counters := &executionCounters{}
 	visited := map[string]bool{}
-	_, runErr := s.syncRepository(ctx, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, 0, nil, targetCredential, visited, counters, logger)
+	gitClient := s.git.WithLogger(func(format string, args ...any) {
+		logger.log(ctx, format, args...)
+	})
+	_, runErr := s.syncRepository(ctx, gitClient, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, 0, nil, targetCredential, visited, counters, logger)
 
 	finished := time.Now().UTC()
 	execution.FinishedAt = &finished
@@ -178,7 +181,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	return execution, nil
 }
 
-func (s *Service) syncRepository(ctx context.Context, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, depth int, parentNodeID *int64, targetCredential *domain.Credential, visited map[string]bool, counters *executionCounters, logger *executionLogger) (domain.SyncExecutionNode, error) {
+func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, depth int, parentNodeID *int64, targetCredential *domain.Credential, visited map[string]bool, counters *executionCounters, logger *executionLogger) (domain.SyncExecutionNode, error) {
 	nodeLabel := repoPath
 	if nodeLabel == "" {
 		nodeLabel = "(root)"
@@ -250,7 +253,7 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 	}
 
 	logger.log(ctx, "Refreshing mirror cache for %s", nodeLabel)
-	cacheHitFromGit, fetchDuration, fetchErr := s.git.EnsureMirror(ctx, sourceRepoURL, cachePath)
+	cacheHitFromGit, fetchDuration, fetchErr := gitClient.EnsureMirror(ctx, sourceRepoURL, cachePath)
 	node.CacheHit = node.CacheHit || cacheHitFromGit
 	node.FetchDuration = fetchDuration.Milliseconds()
 	if fetchErr != nil {
@@ -291,7 +294,7 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 
 	if task.RecursiveSubmodules {
 		logger.log(ctx, "Scanning submodules for %s", nodeLabel)
-		submodules, subErr := s.git.ReadSubmodules(ctx, cachePath)
+		submodules, subErr := gitClient.ReadSubmodules(ctx, cachePath)
 		if subErr != nil {
 			logger.log(ctx, "Failed to read submodules for %s: %v", nodeLabel, subErr)
 			counters.failedNodeCount++
@@ -305,7 +308,7 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.Path)
 			urlMapping[submodule.Path] = childTarget
 			logger.log(ctx, "Discovered submodule %s -> %s", submodule.Path, childTarget)
-			childNode, childErr := s.syncRepository(ctx, executionID, task, submodule.Path, submodule.URL, childTarget, depth+1, &node.ID, targetCredential, visited, counters, logger)
+			childNode, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, depth+1, &node.ID, targetCredential, visited, counters, logger)
 			if childErr != nil {
 				logger.log(ctx, "Submodule sync failed for %s: %v", submodule.Path, childErr)
 				node.Status = domain.ExecutionStatusFailed
@@ -317,7 +320,7 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 			_ = childNode
 		}
 		logger.log(ctx, "Pushing mirrored refs for %s", nodeLabel)
-		pushDuration, pushErr := s.git.MirrorPush(ctx, cachePath, targetRepoURL)
+		pushDuration, pushErr := gitClient.MirrorPush(ctx, cachePath, targetRepoURL)
 		if pushErr != nil {
 			logger.log(ctx, "Mirror push failed for %s: %v", nodeLabel, pushErr)
 			node.PushDuration = pushDuration.Milliseconds()
@@ -328,9 +331,9 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 			return node, pushErr
 		}
 		logger.log(ctx, "Rewriting .gitmodules URLs for %s", nodeLabel)
-		rewriteDuration, rewriteErr := s.git.RewriteSubmoduleURLsAndPushBranches(ctx, cachePath, targetRepoURL, urlMapping)
+		rewriteDuration, rewriteErr := gitClient.RewriteSubmoduleURLsAndPushBranches(ctx, cachePath, targetRepoURL, urlMapping)
 		node.PushDuration = (pushDuration + rewriteDuration).Milliseconds()
-		node.ReferenceCommit = s.git.ResolveHEAD(ctx, cachePath)
+		node.ReferenceCommit = gitClient.ResolveHEAD(ctx, cachePath)
 		node.Status = executionStatus(rewriteErr)
 		node.ErrorMessage = errorString(rewriteErr)
 		if rewriteErr != nil {
@@ -345,9 +348,9 @@ func (s *Service) syncRepository(ctx context.Context, executionID int64, task do
 		return node, err
 	}
 
-	node.ReferenceCommit = s.git.ResolveHEAD(ctx, cachePath)
+	node.ReferenceCommit = gitClient.ResolveHEAD(ctx, cachePath)
 	logger.log(ctx, "Pushing mirrored refs for %s", nodeLabel)
-	pushDuration, pushErr := s.git.MirrorPush(ctx, cachePath, targetRepoURL)
+	pushDuration, pushErr := gitClient.MirrorPush(ctx, cachePath, targetRepoURL)
 	node.PushDuration = pushDuration.Milliseconds()
 	node.Status = executionStatus(pushErr)
 	node.ErrorMessage = errorString(pushErr)

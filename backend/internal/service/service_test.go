@@ -121,6 +121,9 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if !strings.Contains(detail.Execution.SummaryLog, "Refreshing mirror cache") {
 		t.Fatalf("expected execution summary log to include progress output, got:\n%s", detail.Execution.SummaryLog)
 	}
+	if !strings.Contains(detail.Execution.SummaryLog, "git exec: fetch --prune origin +refs/*:refs/*") {
+		t.Fatalf("expected execution summary log to include raw git command output, got:\n%s", detail.Execution.SummaryLog)
+	}
 }
 
 func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
