@@ -160,6 +160,30 @@ const filteredWebhookEvents = computed(() => {
   return webhookEvents.value.filter((item) => item.status === webhookStatusFilter.value)
 })
 
+const webhookStatusCards = computed(() => {
+  const counts = {
+    accepted: 0,
+    ignored: 0,
+    rejected: 0,
+    failed: 0,
+    blocked: 0,
+  }
+  for (const item of webhookEvents.value) {
+    if (item.status in counts) {
+      counts[item.status as keyof typeof counts] += 1
+    }
+  }
+  return [
+    { label: 'Accepted', value: String(counts.accepted), status: 'accepted' },
+    { label: 'Ignored', value: String(counts.ignored), status: 'ignored' },
+    { label: 'Rejected', value: String(counts.rejected), status: 'rejected' },
+    { label: 'Failed', value: String(counts.failed), status: 'failed' },
+    { label: 'Blocked', value: String(counts.blocked), status: 'blocked' },
+  ]
+})
+
+const latestIgnoredWebhook = computed(() => webhookEvents.value.find((item) => item.status === 'ignored') ?? null)
+
 const loadTasks = async () => {
   tasks.value = await api.listTasks()
 }
@@ -386,6 +410,21 @@ const scheduleStateLabel = (item: ScheduleStatus) => {
   if (item.registered) return '已注册'
   if (!item.enabled) return '任务停用'
   return '未注册'
+}
+
+const webhookEventStatusType = (status?: string) => {
+  if (status === 'accepted') return 'success'
+  if (status === 'ignored') return 'warning'
+  if (status === 'blocked') return 'info'
+  return 'danger'
+}
+
+const webhookReasonLabel = (reason?: string) => {
+  if (!reason) return '-'
+  if (reason === 'branch does not match trigger config') return '分支与任务过滤条件不匹配'
+  if (reason === 'unsupported github event' || reason === 'unsupported gogs event') return 'Webhook 事件类型未启用'
+  if (reason === 'webhook is disabled for this task') return '任务未启用 Webhook'
+  return reason
 }
 
 const toggleNode = (nodeId: number) => {
@@ -766,10 +805,31 @@ onBeforeUnmount(() => {
                   </el-select>
                 </div>
               </div>
+              <div class="webhook-status-grid">
+                <div
+                  v-for="item in webhookStatusCards"
+                  :key="item.label"
+                  class="webhook-status-card"
+                  :data-status="item.status"
+                >
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value }}</strong>
+                </div>
+              </div>
+              <div v-if="latestIgnoredWebhook" class="webhook-reason-banner">
+                <div class="panel-header">
+                  <strong>最近一次忽略原因</strong>
+                  <el-tag size="small" type="warning">{{ latestIgnoredWebhook.eventType || 'push' }}</el-tag>
+                </div>
+                <p>{{ webhookReasonLabel(latestIgnoredWebhook.reason) }}</p>
+                <span class="muted-text mono">
+                  {{ latestIgnoredWebhook.ref || 'no ref' }} · {{ latestIgnoredWebhook.createdAt }}
+                </span>
+              </div>
               <el-table :data="filteredWebhookEvents" height="260" empty-text="暂无 Webhook 记录">
                 <el-table-column prop="status" label="状态" width="100">
                   <template #default="{ row }">
-                    <el-tag size="small" :type="row.status === 'accepted' ? 'success' : row.status === 'ignored' ? 'warning' : 'danger'">
+                    <el-tag size="small" :type="webhookEventStatusType(row.status)">
                       {{ row.status }}
                     </el-tag>
                   </template>
@@ -777,7 +837,11 @@ onBeforeUnmount(() => {
                 <el-table-column prop="eventType" label="事件" width="90" />
                 <el-table-column prop="ref" label="Ref" min-width="180" />
                 <el-table-column prop="createdAt" label="时间" width="180" />
-                <el-table-column prop="reason" label="结果" min-width="220" />
+                <el-table-column label="结果" min-width="260">
+                  <template #default="{ row }">
+                    <span :class="{ 'warning-text': row.status === 'ignored' }">{{ webhookReasonLabel(row.reason) }}</span>
+                  </template>
+                </el-table-column>
                 <el-table-column label="执行" width="90">
                   <template #default="{ row }">
                     <el-button v-if="row.executionId" size="small" @click="openExecutionByID(row.executionId)">跳转</el-button>

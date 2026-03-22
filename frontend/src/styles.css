@@ -235,6 +235,62 @@ h1 {
   border-top: 1px solid rgba(29, 42, 34, 0.08);
 }
 
+.webhook-status-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.webhook-status-card {
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(29, 42, 34, 0.08);
+  background: rgba(243, 247, 241, 0.88);
+}
+
+.webhook-status-card[data-status="accepted"] {
+  background: rgba(31, 122, 90, 0.12);
+}
+
+.webhook-status-card[data-status="ignored"] {
+  background: rgba(198, 143, 32, 0.12);
+}
+
+.webhook-status-card[data-status="rejected"],
+.webhook-status-card[data-status="failed"] {
+  background: rgba(160, 67, 47, 0.11);
+}
+
+.webhook-status-card[data-status="blocked"] {
+  background: rgba(95, 107, 98, 0.12);
+}
+
+.webhook-status-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.webhook-status-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 24px;
+}
+
+.webhook-reason-banner {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(198, 143, 32, 0.25);
+  background: rgba(198, 143, 32, 0.1);
+}
+
+.webhook-reason-banner p {
+  margin: 0;
+  color: var(--text);
+}
+
 .history-toolbar {
   display: flex;
   align-items: center;
@@ -335,6 +391,10 @@ h1 {
   color: #a0432f;
 }
 
+.warning-text {
+  color: #8d6512;
+}
+
 .node-detail-card {
   display: grid;
   gap: 16px;
@@ -378,6 +438,7 @@ h1 {
   .two-column,
   .status-grid,
   .trigger-grid,
+  .webhook-status-grid,
   .execution-layout,
   .node-detail-grid {
     grid-template-columns: 1fr;
