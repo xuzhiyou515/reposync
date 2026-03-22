@@ -120,6 +120,88 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	}
 }
 
+func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for integration test")
+	}
+
+	root := t.TempDir()
+	subSourceBare := filepath.Join(root, "sub-source.git")
+	subTargetBare := filepath.Join(root, "target-main-libs-core.git")
+	mainSourceBare := filepath.Join(root, "main-source.git")
+	mainTargetBare := filepath.Join(root, "target-main.git")
+	subWorktree := filepath.Join(root, "sub-work")
+	mainWorktree := filepath.Join(root, "main-work")
+	dbPath := filepath.Join(root, "reposync.db")
+	cacheDir := filepath.Join(root, "cache")
+
+	runGit(t, "", "init", "--bare", subSourceBare)
+	runGit(t, "", "init", "--bare", subTargetBare)
+	runGit(t, "", "clone", subSourceBare, subWorktree)
+	runGit(t, subWorktree, "config", "user.name", "RepoSync Test")
+	runGit(t, subWorktree, "config", "user.email", "reposync@example.com")
+	writeFile(t, filepath.Join(subWorktree, "sub.txt"), "submodule\n")
+	runGit(t, subWorktree, "add", ".")
+	runGit(t, subWorktree, "commit", "-m", "submodule init")
+	runGit(t, subWorktree, "push", "-u", "origin", "master")
+
+	runGit(t, "", "init", "--bare", mainSourceBare)
+	runGit(t, "", "init", "--bare", mainTargetBare)
+	runGit(t, "", "clone", mainSourceBare, mainWorktree)
+	runGit(t, mainWorktree, "config", "user.name", "RepoSync Test")
+	runGit(t, mainWorktree, "config", "user.email", "reposync@example.com")
+	writeFile(t, filepath.Join(mainWorktree, "README.md"), "main\n")
+	runGit(t, mainWorktree, "add", ".")
+	runGit(t, mainWorktree, "commit", "-m", "main init")
+	runGit(t, mainWorktree, "push", "-u", "origin", "master")
+	runGitWithEnv(t, mainWorktree, []string{"GIT_ALLOW_PROTOCOL=file"}, "submodule", "add", subSourceBare, "libs/core")
+	runGit(t, mainWorktree, "commit", "-am", "add submodule")
+	runGit(t, mainWorktree, "push", "origin", "master")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, cacheDir, gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                "recursive-submodules",
+		SourceRepoURL:       mainSourceBare,
+		TargetRepoURL:       mainTargetBare,
+		Enabled:             true,
+		RecursiveSubmodules: true,
+		SyncAllRefs:         true,
+		ProviderConfig:      domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	execution, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("recursive run failed: %v", err)
+	}
+	if execution.Status != domain.ExecutionStatusSuccess {
+		t.Fatalf("expected success, got %s", execution.Status)
+	}
+	if execution.RepoCount != 2 {
+		t.Fatalf("expected 2 mirrored repositories, got %d", execution.RepoCount)
+	}
+
+	assertGitRef(t, mainTargetBare, "refs/heads/master")
+	assertGitRef(t, subTargetBare, "refs/heads/master")
+
+	detail, err := svc.ExecutionDetail(context.Background(), execution.ID)
+	if err != nil {
+		t.Fatalf("execution detail: %v", err)
+	}
+	if len(detail.Nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(detail.Nodes))
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -127,6 +209,20 @@ func runGit(t *testing.T, dir string, args ...string) string {
 		cmd.Dir = dir
 	}
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
+	}
+	return string(out)
+}
+
+func runGitWithEnv(t *testing.T, dir string, extraEnv []string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(out))

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -14,6 +15,12 @@ import (
 
 type Client struct {
 	bin string
+}
+
+type Submodule struct {
+	Path   string
+	URL    string
+	Commit string
 }
 
 func NewClient(bin string) *Client {
@@ -68,6 +75,35 @@ func (c *Client) ResolveHEAD(ctx context.Context, repoPath string) string {
 	return strings.TrimSpace(out)
 }
 
+func (c *Client) ReadSubmodules(ctx context.Context, repoPath string) ([]Submodule, error) {
+	content, err := c.run(ctx, repoPath, "show", "HEAD:.gitmodules")
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	configured := parseGitmodules(content)
+	var result []Submodule
+	for _, item := range configured {
+		tree, treeErr := c.run(ctx, repoPath, "ls-tree", "HEAD", item.Path)
+		if treeErr != nil {
+			return nil, treeErr
+		}
+		fields := strings.Fields(strings.TrimSpace(tree))
+		if len(fields) < 3 {
+			continue
+		}
+		result = append(result, Submodule{
+			Path:   item.Path,
+			URL:    item.URL,
+			Commit: fields[2],
+		})
+	}
+	return result, nil
+}
+
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	if dir != "" {
@@ -90,4 +126,34 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 func isGitMirror(path string) bool {
 	info, err := os.Stat(filepath.Join(path, "HEAD"))
 	return err == nil && !info.IsDir()
+}
+
+type submoduleConfig struct {
+	Path string
+	URL  string
+}
+
+func parseGitmodules(content string) []submoduleConfig {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	var current submoduleConfig
+	var result []submoduleConfig
+	flush := func() {
+		if current.Path != "" && current.URL != "" {
+			result = append(result, current)
+		}
+		current = submoduleConfig{}
+	}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.HasPrefix(line, "[submodule"):
+			flush()
+		case strings.HasPrefix(line, "path ="):
+			current.Path = strings.TrimSpace(strings.TrimPrefix(line, "path ="))
+		case strings.HasPrefix(line, "url ="):
+			current.URL = strings.TrimSpace(strings.TrimPrefix(line, "url ="))
+		}
+	}
+	flush()
+	return result
 }

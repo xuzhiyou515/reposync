@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,12 @@ func buildCacheKey(source, target string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+type executionCounters struct {
+	repoCount        int
+	createdRepoCount int
+	failedNodeCount  int
+}
+
 func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.TriggerType) (domain.SyncExecution, error) {
 	lock := s.taskLock(taskID)
 	lock.Lock()
@@ -122,8 +129,64 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		return domain.SyncExecution{}, err
 	}
 
+	counters := &executionCounters{}
+	visited := map[string]bool{}
+	_, runErr := s.syncRepository(ctx, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, 0, nil, targetCredential, visited, counters)
+
+	finished := time.Now().UTC()
+	execution.FinishedAt = &finished
+	execution.RepoCount = counters.repoCount
+	execution.CreatedRepoCount = counters.createdRepoCount
+	execution.FailedNodeCount = counters.failedNodeCount
+	if runErr != nil {
+		execution.Status = domain.ExecutionStatusFailed
+		execution.SummaryLog = runErr.Error()
+	} else {
+		execution.Status = domain.ExecutionStatusSuccess
+		execution.SummaryLog = "Mirror sync completed with all branches, tags, refs, and recursive submodules."
+	}
+	if err := s.store.UpdateExecution(ctx, execution); err != nil {
+		return domain.SyncExecution{}, err
+	}
+	if runErr != nil {
+		return execution, runErr
+	}
+	return execution, nil
+}
+
+func (s *Service) syncRepository(ctx context.Context, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, depth int, parentNodeID *int64, targetCredential *domain.Credential, visited map[string]bool, counters *executionCounters) (domain.SyncExecutionNode, error) {
+	if visited[sourceRepoURL] {
+		counters.failedNodeCount++
+		node, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
+			ExecutionID:   executionID,
+			ParentNodeID:  parentNodeID,
+			RepoPath:      repoPath,
+			SourceRepoURL: sourceRepoURL,
+			TargetRepoURL: targetRepoURL,
+			Depth:         depth,
+			Status:        domain.ExecutionStatusFailed,
+			ErrorMessage:  "detected recursive submodule cycle",
+		})
+		return node, err
+	}
+	visited[sourceRepoURL] = true
+	defer delete(visited, sourceRepoURL)
+
+	node, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
+		ExecutionID:   executionID,
+		ParentNodeID:  parentNodeID,
+		RepoPath:      repoPath,
+		SourceRepoURL: sourceRepoURL,
+		TargetRepoURL: targetRepoURL,
+		Depth:         depth,
+		Status:        domain.ExecutionStatusRunning,
+	})
+	if err != nil {
+		return domain.SyncExecutionNode{}, err
+	}
+
 	now := time.Now().UTC()
-	cacheKey := buildCacheKey(task.SourceRepoURL, task.TargetRepoURL)
+	cacheKey := buildCacheKey(sourceRepoURL, targetRepoURL)
 	cachePath := filepath.Join(s.cacheDir, cacheKey+".git")
 	_ = os.MkdirAll(s.cacheDir, 0o755)
 
@@ -133,48 +196,35 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		cacheHit = true
 		hitCount = existing.HitCount + 1
 	} else if getErr != nil && getErr != sql.ErrNoRows {
-		return domain.SyncExecution{}, getErr
+		return node, getErr
 	}
 
-	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, task.TargetRepoURL, task.ProviderConfig, targetCredential)
+	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, targetRepoURL, task.ProviderConfig, targetCredential)
+	node.CacheKey = cacheKey
+	node.CacheHit = cacheHit
+	node.AutoCreated = autoCreated
+	node.CreateDuration = createDuration.Milliseconds()
 	if createErr != nil {
-		finished := time.Now().UTC()
-		execution.Status = domain.ExecutionStatusFailed
-		execution.FinishedAt = &finished
-		execution.FailedNodeCount = 1
-		execution.SummaryLog = createErr.Error()
-		if _, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
-			ExecutionID:    execution.ID,
-			RepoPath:       "",
-			SourceRepoURL:  task.SourceRepoURL,
-			TargetRepoURL:  task.TargetRepoURL,
-			Depth:          0,
-			CacheKey:       cacheKey,
-			CacheHit:       cacheHit,
-			AutoCreated:    false,
-			CreateDuration: createDuration.Milliseconds(),
-			Status:         domain.ExecutionStatusFailed,
-			ErrorMessage:   createErr.Error(),
-		}); err != nil {
-			return domain.SyncExecution{}, err
-		}
-		if err := s.store.UpdateExecution(ctx, execution); err != nil {
-			return domain.SyncExecution{}, err
-		}
-		return execution, createErr
+		node.Status = domain.ExecutionStatusFailed
+		node.ErrorMessage = createErr.Error()
+		counters.failedNodeCount++
+		_ = s.store.UpdateExecutionNode(ctx, node)
+		return node, createErr
+	}
+	if autoCreated {
+		counters.createdRepoCount++
 	}
 
-	cacheHitFromGit, fetchDuration, fetchErr := s.git.EnsureMirror(ctx, task.SourceRepoURL, cachePath)
-	cacheHit = cacheHit || cacheHitFromGit
+	cacheHitFromGit, fetchDuration, fetchErr := s.git.EnsureMirror(ctx, sourceRepoURL, cachePath)
+	node.CacheHit = node.CacheHit || cacheHitFromGit
+	node.FetchDuration = fetchDuration.Milliseconds()
 	if fetchErr != nil {
-		finished := time.Now().UTC()
-		execution.Status = domain.ExecutionStatusFailed
-		execution.FinishedAt = &finished
-		execution.FailedNodeCount = 1
-		execution.SummaryLog = fetchErr.Error()
+		counters.failedNodeCount++
+		node.Status = domain.ExecutionStatusFailed
+		node.ErrorMessage = fetchErr.Error()
 		_ = s.store.UpsertCache(ctx, domain.RepoCache{
 			CacheKey:         cacheKey,
-			SourceRepoURL:    task.SourceRepoURL,
+			SourceRepoURL:    sourceRepoURL,
 			AuthContext:      "managed",
 			CachePath:        cachePath,
 			LastFetchAt:      &now,
@@ -183,82 +233,74 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 			HealthStatus:     "broken",
 			LastErrorMessage: fetchErr.Error(),
 		})
-		if _, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
-			ExecutionID:    execution.ID,
-			RepoPath:       "",
-			SourceRepoURL:  task.SourceRepoURL,
-			TargetRepoURL:  task.TargetRepoURL,
-			Depth:          0,
-			CacheKey:       cacheKey,
-			CacheHit:       cacheHit,
-			AutoCreated:    autoCreated,
-			CreateDuration: createDuration.Milliseconds(),
-			FetchDuration:  fetchDuration.Milliseconds(),
-			Status:         domain.ExecutionStatusFailed,
-			ErrorMessage:   fetchErr.Error(),
-		}); err != nil {
-			return domain.SyncExecution{}, err
-		}
-		if err := s.store.UpdateExecution(ctx, execution); err != nil {
-			return domain.SyncExecution{}, err
-		}
-		return execution, fetchErr
+		_ = s.store.UpdateExecutionNode(ctx, node)
+		return node, fetchErr
 	}
 
-	pushDuration, pushErr := s.git.MirrorPush(ctx, cachePath, task.TargetRepoURL)
-	if err := s.store.UpsertCache(ctx, domain.RepoCache{
+	_ = s.store.UpsertCache(ctx, domain.RepoCache{
 		CacheKey:      cacheKey,
-		SourceRepoURL: task.SourceRepoURL,
+		SourceRepoURL: sourceRepoURL,
 		AuthContext:   "managed",
 		CachePath:     cachePath,
 		LastFetchAt:   &now,
 		LastUsedAt:    &now,
 		HitCount:      hitCount,
-		SizeBytes:     0,
 		HealthStatus:  "ready",
-	}); err != nil {
-		return domain.SyncExecution{}, err
-	}
+	})
 
-	if _, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
-		ExecutionID:     execution.ID,
-		RepoPath:        "",
-		SourceRepoURL:   task.SourceRepoURL,
-		TargetRepoURL:   task.TargetRepoURL,
-		ReferenceCommit: s.git.ResolveHEAD(ctx, cachePath),
-		Depth:           0,
-		CacheKey:        cacheKey,
-		CacheHit:        cacheHit,
-		AutoCreated:     autoCreated,
-		CreateDuration:  createDuration.Milliseconds(),
-		FetchDuration:   fetchDuration.Milliseconds(),
-		PushDuration:    pushDuration.Milliseconds(),
-		Status:          executionStatus(pushErr),
-		ErrorMessage:    errorString(pushErr),
-	}); err != nil {
-		return domain.SyncExecution{}, err
-	}
-
-	finished := time.Now().UTC()
-	execution.Status = executionStatus(pushErr)
-	execution.FinishedAt = &finished
-	if pushErr == nil {
-		execution.RepoCount = 1
-		if autoCreated {
-			execution.CreatedRepoCount = 1
+	if task.RecursiveSubmodules {
+		submodules, subErr := s.git.ReadSubmodules(ctx, cachePath)
+		if subErr != nil {
+			counters.failedNodeCount++
+			node.Status = domain.ExecutionStatusFailed
+			node.ErrorMessage = subErr.Error()
+			_ = s.store.UpdateExecutionNode(ctx, node)
+			return node, subErr
 		}
-		execution.SummaryLog = "Mirror sync completed with all branches, tags, and refs."
-	} else {
-		execution.FailedNodeCount = 1
-		execution.SummaryLog = pushErr.Error()
+		for _, submodule := range submodules {
+			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.Path)
+			childNode, childErr := s.syncRepository(ctx, executionID, task, submodule.Path, submodule.URL, childTarget, depth+1, &node.ID, targetCredential, visited, counters)
+			if childErr != nil {
+				node.Status = domain.ExecutionStatusFailed
+				node.ErrorMessage = childErr.Error()
+				node.ReferenceCommit = submodule.Commit
+				_ = s.store.UpdateExecutionNode(ctx, node)
+				return childNode, childErr
+			}
+			_ = childNode
+		}
 	}
-	if err := s.store.UpdateExecution(ctx, execution); err != nil {
-		return domain.SyncExecution{}, err
-	}
+
+	node.ReferenceCommit = s.git.ResolveHEAD(ctx, cachePath)
+	pushDuration, pushErr := s.git.MirrorPush(ctx, cachePath, targetRepoURL)
+	node.PushDuration = pushDuration.Milliseconds()
+	node.Status = executionStatus(pushErr)
+	node.ErrorMessage = errorString(pushErr)
 	if pushErr != nil {
-		return execution, pushErr
+		counters.failedNodeCount++
+		_ = s.store.UpdateExecutionNode(ctx, node)
+		return node, pushErr
 	}
-	return execution, nil
+
+	counters.repoCount++
+	err = s.store.UpdateExecutionNode(ctx, node)
+	return node, err
+}
+
+func mapSubmoduleTarget(parentTarget string, submodulePath string) string {
+	if strings.HasSuffix(parentTarget, ".git") {
+		base := strings.TrimSuffix(parentTarget, ".git")
+		flattened := strings.ReplaceAll(strings.Trim(submodulePath, "/"), "/", "-")
+		if flattened == "" {
+			flattened = "submodule"
+		}
+		return base + "-" + flattened + ".git"
+	}
+	flattened := strings.ReplaceAll(strings.Trim(submodulePath, "/"), "/", "-")
+	if flattened == "" {
+		flattened = "submodule"
+	}
+	return parentTarget + "-" + flattened + ".git"
 }
 
 func executionStatus(err error) domain.ExecutionStatus {

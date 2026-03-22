@@ -431,6 +431,20 @@ INSERT INTO sync_execution_nodes (
 	return node, nil
 }
 
+func (s *Store) UpdateExecutionNode(ctx context.Context, node domain.SyncExecutionNode) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE sync_execution_nodes SET
+ parent_node_id = ?, repo_path = ?, source_repo_url = ?, target_repo_url = ?, reference_commit = ?,
+ depth = ?, cache_key = ?, cache_hit = ?, auto_created = ?, create_duration_ms = ?, fetch_duration_ms = ?,
+ push_duration_ms = ?, status = ?, error_message = ?
+WHERE id = ?`,
+		node.ParentNodeID, node.RepoPath, node.SourceRepoURL, node.TargetRepoURL, node.ReferenceCommit,
+		node.Depth, node.CacheKey, boolInt(node.CacheHit), boolInt(node.AutoCreated), node.CreateDuration,
+		node.FetchDuration, node.PushDuration, node.Status, node.ErrorMessage, node.ID,
+	)
+	return err
+}
+
 func (s *Store) ListExecutionsForTask(ctx context.Context, taskID int64) ([]domain.SyncExecution, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, task_id, trigger_type, status, started_at, finished_at, repo_count, created_repo_count, failed_node_count, summary_log
