@@ -135,6 +135,10 @@ func (c *Client) RewriteSubmoduleURLsAndPushBranches(ctx context.Context, cacheP
 		if _, err := c.run(ctx, tempDir, "checkout", "-B", branch, "origin/"+branch); err != nil {
 			return 0, err
 		}
+		sourceCommitDate, err := c.commitDate(ctx, tempDir, "HEAD")
+		if err != nil {
+			return 0, err
+		}
 		changed, err := rewriteGitmodulesFile(filepath.Join(tempDir, ".gitmodules"), mapping)
 		if err != nil {
 			return 0, err
@@ -143,7 +147,11 @@ func (c *Client) RewriteSubmoduleURLsAndPushBranches(ctx context.Context, cacheP
 			if _, err := c.run(ctx, tempDir, "add", ".gitmodules"); err != nil {
 				return 0, err
 			}
-			if _, err := c.run(ctx, tempDir, "commit", "-m", "Rewrite submodule URLs for mirror target"); err != nil {
+			env := []string{
+				"GIT_AUTHOR_DATE=" + sourceCommitDate,
+				"GIT_COMMITTER_DATE=" + sourceCommitDate,
+			}
+			if _, err := c.runWithEnv(ctx, tempDir, env, "commit", "-m", "Rewrite submodule URLs for mirror target"); err != nil {
 				return 0, err
 			}
 		}
@@ -156,9 +164,16 @@ func (c *Client) RewriteSubmoduleURLsAndPushBranches(ctx context.Context, cacheP
 }
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
+	return c.runWithEnv(ctx, dir, nil, args...)
+}
+
+func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -172,6 +187,14 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), errors.New(msg))
 	}
 	return stdout.String(), nil
+}
+
+func (c *Client) commitDate(ctx context.Context, repoPath string, rev string) (string, error) {
+	out, err := c.run(ctx, repoPath, "show", "-s", "--format=%cI", rev)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func isGitMirror(path string) bool {

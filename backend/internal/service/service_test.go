@@ -192,6 +192,7 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 
 	assertGitRef(t, mainTargetBare, "refs/heads/master")
 	assertGitRef(t, subTargetBare, "refs/heads/master")
+	firstTargetHead := gitRevParse(t, mainTargetBare, "refs/heads/master")
 
 	cloneDir := filepath.Join(root, "clone-target")
 	runGitWithEnv(t, "", []string{"GIT_ALLOW_PROTOCOL=file"}, "clone", "--recurse-submodules", mainTargetBare, cloneDir)
@@ -212,6 +213,18 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	}
 	if len(detail.Nodes) != 2 {
 		t.Fatalf("expected 2 nodes, got %d", len(detail.Nodes))
+	}
+
+	secondExecution, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("second recursive run failed: %v", err)
+	}
+	if secondExecution.Status != domain.ExecutionStatusSuccess {
+		t.Fatalf("expected second recursive run success, got %s", secondExecution.Status)
+	}
+	secondTargetHead := gitRevParse(t, mainTargetBare, "refs/heads/master")
+	if secondTargetHead != firstTargetHead {
+		t.Fatalf("expected rewritten target branch head to remain stable, got %s then %s", firstTargetHead, secondTargetHead)
 	}
 }
 
@@ -257,4 +270,14 @@ func assertGitRef(t *testing.T, repo string, ref string) {
 	if err != nil {
 		t.Fatalf("expected ref %s in %s: %v\n%s", ref, repo, err, string(out))
 	}
+}
+
+func gitRevParse(t *testing.T, repo string, rev string) string {
+	t.Helper()
+	cmd := exec.Command("git", "--git-dir", repo, "rev-parse", rev)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse %s in %s failed: %v\n%s", rev, repo, err, string(out))
+	}
+	return strings.TrimSpace(string(out))
 }
