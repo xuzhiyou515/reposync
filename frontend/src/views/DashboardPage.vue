@@ -25,8 +25,10 @@ const expandedNodeIds = ref<Set<number>>(new Set())
 const errorOnly = ref(false)
 const selectedNodeId = ref<number | null>(null)
 const webhookStatusFilter = ref<'all' | 'accepted' | 'ignored' | 'rejected' | 'failed' | 'blocked'>('all')
+const TASK_LIST_REFRESH_MS = 15000
 let executionStream: EventSource | null = null
 let executionSocket: WebSocket | null = null
+let taskListRefreshTimer: number | null = null
 const executionTreeRef = ref<InstanceType<typeof ElTree>>()
 const taskFormRef = ref<FormInstance>()
 const credentialSecretMasked = ref('')
@@ -136,6 +138,7 @@ const taskSummary = computed(() => ({
   enabled: tasks.value.filter((item) => item.enabled).length,
   recursive: tasks.value.filter((item) => item.recursiveSubmodules).length,
   scheduled: tasks.value.filter((item) => item.triggerConfig.enableSchedule).length,
+  running: tasks.value.filter((item) => item.lastExecutionStatus === 'running').length,
 }))
 
 const taskDialogTitle = computed(() => (taskForm.id ? '编辑任务' : '新增任务'))
@@ -215,10 +218,12 @@ const selectedExecutionStats = computed(() => {
   }
   const nodes = selectedExecution.value.nodes
   return [
+    { label: '触发', value: String(selectedExecution.value.execution.triggerType) },
+    { label: '仓库', value: String(selectedExecution.value.execution.repoCount) },
+    { label: '建仓', value: String(selectedExecution.value.execution.createdRepoCount) },
     { label: '缓存命中', value: String(nodes.filter((node) => node.cacheHit).length) },
-    { label: '自动建仓', value: String(nodes.filter((node) => node.autoCreated).length) },
-    { label: '失败节点', value: String(nodes.filter((node) => node.status === 'failed').length) },
     { label: '总节点', value: String(nodes.length) },
+    { label: '失败节点', value: String(nodes.filter((node) => node.status === 'failed').length) },
   ]
 })
 
@@ -452,7 +457,6 @@ const editTask = (task: SyncTask) => {
 const removeTask = async (task: SyncTask) => {
   await api.deleteTask(task.id)
   tasks.value = tasks.value.filter((item) => item.id !== task.id)
-  schedules.value = schedules.value.filter((item) => item.taskId !== task.id)
   ElMessage.success('任务已删除')
   if (executionTaskId.value === task.id) {
     executionTaskId.value = null
@@ -464,6 +468,35 @@ const removeTask = async (task: SyncTask) => {
     stopExecutionStreaming()
   }
   await refreshAll()
+}
+
+const refreshTaskListIfVisible = async () => {
+  if (document.visibilityState !== 'visible' || loading.value) {
+    return
+  }
+  await loadTasks()
+}
+
+const startTaskListAutoRefresh = () => {
+  if (taskListRefreshTimer != null) {
+    window.clearInterval(taskListRefreshTimer)
+  }
+  taskListRefreshTimer = window.setInterval(() => {
+    void refreshTaskListIfVisible()
+  }, TASK_LIST_REFRESH_MS)
+}
+
+const stopTaskListAutoRefresh = () => {
+  if (taskListRefreshTimer != null) {
+    window.clearInterval(taskListRefreshTimer)
+    taskListRefreshTimer = null
+  }
+}
+
+const handlePageVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    void refreshTaskListIfVisible()
+  }
 }
 
 const runTask = async (task: SyncTask) => {
@@ -793,9 +826,13 @@ const onTreeNodeCollapse = (node: ExecutionTreeNode) => {
 
 onMounted(async () => {
   await refreshAll()
+  startTaskListAutoRefresh()
+  document.addEventListener('visibilitychange', handlePageVisibilityChange)
 })
 
 onBeforeUnmount(() => {
+  stopTaskListAutoRefresh()
+  document.removeEventListener('visibilitychange', handlePageVisibilityChange)
   stopExecutionStreaming()
 })
 </script>
@@ -823,6 +860,10 @@ onBeforeUnmount(() => {
         <div class="stat-card">
           <strong>{{ taskSummary.scheduled }}</strong>
           <span>启用调度</span>
+        </div>
+        <div class="stat-card">
+          <strong>{{ taskSummary.running }}</strong>
+          <span>正在执行</span>
         </div>
       </div>
     </section>
@@ -1061,11 +1102,22 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="executionDetailVisible"
-      title="执行详情"
       width="1280px"
       destroy-on-close
       @closed="closeExecutionDetail"
     >
+      <template #header>
+        <div class="execution-dialog-header">
+          <strong>执行详情</strong>
+          <el-tag
+            v-if="selectedExecution"
+            class="execution-dialog-status"
+            :type="taskStatusType(selectedExecution.execution.status)"
+          >
+            {{ selectedExecution.execution.status }}
+          </el-tag>
+        </div>
+      </template>
       <div v-if="executionDetailLoading" class="execution-loading-state">
         <el-skeleton :rows="8" animated />
         <p class="muted-text">正在启动任务并加载执行详情...</p>
@@ -1073,67 +1125,31 @@ onBeforeUnmount(() => {
       <div v-if="selectedExecution" class="detail-stack">
         <div class="detail-block">
           <strong>{{ selectedExecution.task.name }}</strong>
-          <p>
-            {{ selectedExecution.execution.status === 'running' ? '执行中，日志会持续自动刷新。' : '执行结束，以下为本次摘要日志。' }}
-          </p>
-          <p v-if="selectedExecution.task.recursiveSubmodules">
-            当前任务启用了递归子模块，目标分支会保存可直接使用的派生提交；如果需要严格分支 SHA 对齐，请不要把它当成逐字节 branch mirror。
-          </p>
-          <div class="summary-tags">
-            <el-tag size="small">触发: {{ selectedExecution.execution.triggerType }}</el-tag>
-            <el-tag size="small">仓库: {{ selectedExecution.execution.repoCount }}</el-tag>
-            <el-tag size="small">建仓: {{ selectedExecution.execution.createdRepoCount }}</el-tag>
-          </div>
         </div>
 
-        <div class="detail-block log-panel">
-          <div class="panel-header">
-            <strong>执行日志</strong>
-            <el-tag size="small" :type="taskStatusType(selectedExecution.execution.status)">
-              {{ selectedExecution.execution.status }}
-            </el-tag>
-          </div>
-          <pre class="log-output">{{ selectedExecution.execution.summaryLog || '等待日志输出...' }}</pre>
-        </div>
-
-        <div class="status-grid">
+        <div class="execution-summary-strip">
           <div v-for="item in selectedExecutionStats" :key="item.label" class="status-card">
             <span>{{ item.label }}</span>
             <strong>{{ item.value }}</strong>
           </div>
         </div>
 
-        <div class="detail-block trigger-panel">
+        <div class="detail-block log-panel">
           <div class="panel-header">
-            <strong>触发状态面板</strong>
-            <div class="action-row">
-              <el-button size="small" @click="expandAllNodes">展开全部</el-button>
-              <el-button size="small" @click="collapseAllNodes">收起全部</el-button>
-              <el-switch v-model="errorOnly" active-text="只看失败节点" />
-            </div>
+            <strong>执行日志</strong>
           </div>
-          <div class="trigger-grid">
-            <div class="trigger-card">
-              <span>定时计划</span>
-              <strong>{{ taskScheduleState(selectedExecution.task) }}</strong>
-            </div>
-            <div class="trigger-card">
-              <span>Webhook</span>
-              <strong>{{ taskWebhookState(selectedExecution.task) }}</strong>
-            </div>
-            <div class="trigger-card">
-              <span>分支过滤</span>
-              <strong class="mono">{{ taskBranchState(selectedExecution.task) }}</strong>
-            </div>
-            <div class="trigger-card">
-              <span>镜像范围</span>
-              <strong>{{ selectedExecution.task.syncAllRefs ? '全部 refs' : '自定义' }}</strong>
-            </div>
-          </div>
+          <pre class="log-output">{{ selectedExecution.execution.summaryLog || '等待日志输出...' }}</pre>
         </div>
 
         <div class="execution-layout">
           <div class="tree-panel">
+            <div class="execution-tree-toolbar">
+              <div class="action-row">
+                <el-button size="small" @click="expandAllNodes">展开全部</el-button>
+                <el-button size="small" @click="collapseAllNodes">收起全部</el-button>
+              </div>
+              <el-switch v-model="errorOnly" active-text="只看失败节点" />
+            </div>
             <el-tree
               ref="executionTreeRef"
               :data="executionTreeData"

@@ -76,6 +76,7 @@ Copy-Item -Recurse -Force (Join-Path $FrontendDir "dist") $ReleaseFrontendDir
 Copy-Item -Force (Join-Path $RepoRoot "scripts\reposync.env.example") (Join-Path $ReleaseConfigDir "reposync.env.example")
 Copy-Item -Force (Join-Path $RepoRoot "scripts\run-release.ps1") (Join-Path $ReleaseDir "run.ps1")
 Copy-Item -Force (Join-Path $RepoRoot "scripts\run-release.sh") (Join-Path $ReleaseDir "run.sh")
+Copy-Item -Force (Join-Path $RepoRoot "scripts\manage-windows-service.ps1") (Join-Path $ReleaseDir "windows-service.ps1")
 Copy-Item -Force (Join-Path $RepoRoot "docs\deployment.md") (Join-Path $ReleaseDir "DEPLOYMENT.md")
 
 Write-Host "Release bundle created at $ReleaseDir"
