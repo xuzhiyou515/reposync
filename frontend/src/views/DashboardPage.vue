@@ -546,6 +546,9 @@ onBeforeUnmount(() => {
                 <p class="preview-copy">
                   Webhook 当前只处理 push 事件；如果配置了 Branch Reference，则仅接受匹配该 ref 的请求。
                 </p>
+                <p v-if="taskForm.recursiveSubmodules" class="preview-copy">
+                  递归子模块模式会把目标分支改写为可直接使用的派生提交：分支 HEAD 可能不同于源分支，但标签和其他 refs 仍保持 mirror 语义。
+                </p>
               </div>
               <el-button type="primary" @click="saveTask">保存任务</el-button>
             </el-form>
@@ -794,6 +797,9 @@ onBeforeUnmount(() => {
                 <strong>{{ selectedExecution.task.name }}</strong>
                 <p>
                   {{ selectedExecution.execution.status === 'running' ? '执行中，日志每 2 秒自动刷新。' : '执行结束，以下为本次摘要日志。' }}
+                </p>
+                <p v-if="selectedExecution.task.recursiveSubmodules">
+                  当前任务启用了递归子模块，目标分支会保存可直接使用的派生提交；如果需要严格分支 SHA 对齐，请不要把它当成逐字节 branch mirror。
                 </p>
                 <div class="summary-tags">
                   <el-tag size="small">trigger: {{ selectedExecution.execution.triggerType }}</el-tag>
