@@ -14,7 +14,7 @@ const executionTaskId = ref<number | null>(null)
 const expandedNodeIds = ref<Set<number>>(new Set())
 const errorOnly = ref(false)
 const selectedNodeId = ref<number | null>(null)
-let executionPollTimer: number | null = null
+let executionStream: EventSource | null = null
 
 const emptyTask = (): Partial<SyncTask> => ({
   name: '',
@@ -166,10 +166,10 @@ const loadExecutions = async (taskId: number) => {
   executions.value = await api.listExecutions(taskId)
 }
 
-const stopExecutionPolling = () => {
-  if (executionPollTimer != null) {
-    window.clearInterval(executionPollTimer)
-    executionPollTimer = null
+const stopExecutionStreaming = () => {
+  if (executionStream) {
+    executionStream.close()
+    executionStream = null
   }
 }
 
@@ -183,7 +183,7 @@ const refreshSelectedExecution = async () => {
     selectedNodeId.value = detail.nodes[0]?.id ?? null
   }
   if (detail.execution.status !== 'running') {
-    stopExecutionPolling()
+    stopExecutionStreaming()
     if (executionTaskId.value != null) {
       await loadExecutions(executionTaskId.value)
     }
@@ -191,14 +191,31 @@ const refreshSelectedExecution = async () => {
   }
 }
 
-const ensureExecutionPolling = () => {
-  stopExecutionPolling()
+const ensureExecutionStreaming = () => {
+  stopExecutionStreaming()
   if (!selectedExecution.value || selectedExecution.value.execution.status !== 'running') {
     return
   }
-  executionPollTimer = window.setInterval(() => {
+  executionStream = new EventSource(api.executionStreamUrl(selectedExecution.value.execution.id))
+  executionStream.addEventListener('execution', (event) => {
+    const message = event as MessageEvent<string>
+    const detail = JSON.parse(message.data) as ExecutionDetail
+    selectedExecution.value = detail
+    if (selectedNodeId.value == null) {
+      selectedNodeId.value = detail.nodes[0]?.id ?? null
+    }
+    if (detail.execution.status !== 'running') {
+      stopExecutionStreaming()
+      void loadTasks()
+      if (executionTaskId.value != null) {
+        void loadExecutions(executionTaskId.value)
+      }
+    }
+  })
+  executionStream.onerror = () => {
+    stopExecutionStreaming()
     void refreshSelectedExecution()
-  }, 2000)
+  }
 }
 
 const refreshAll = async () => {
@@ -269,7 +286,7 @@ const openExecution = async (execution: SyncExecution) => {
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
   errorOnly.value = false
   selectedNodeId.value = selectedExecution.value.nodes[0]?.id ?? null
-  ensureExecutionPolling()
+  ensureExecutionStreaming()
 }
 
 const cleanupCache = async (cache: RepoCache) => {
@@ -342,7 +359,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  stopExecutionPolling()
+  stopExecutionStreaming()
 })
 </script>
 

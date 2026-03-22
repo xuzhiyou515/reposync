@@ -6,6 +6,7 @@ const http = axios.create({
 })
 
 export const api = {
+  executionStreamUrl: (id: number) => `/api/executions/${id}/stream`,
   listTasks: async () => (await http.get<SyncTask[]>('/tasks')).data,
   saveTask: async (task: Partial<SyncTask>) => {
     if (task.id) {

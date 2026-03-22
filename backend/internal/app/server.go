@@ -287,13 +287,21 @@ func (s *Server) handleCacheByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExecutionByID(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	id, _, err := parseIDAndTail(r.URL.Path, "/api/executions/")
+	id, tail, err := parseIDAndTail(r.URL.Path, "/api/executions/")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid execution id")
+		return
+	}
+	if len(tail) == 1 && tail[0] == "stream" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleExecutionStream(w, r, id)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	detail, err := s.service.ExecutionDetail(r.Context(), id)
@@ -302,6 +310,65 @@ func (s *Server) handleExecutionByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *Server) handleExecutionStream(w http.ResponseWriter, r *http.Request, id int64) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	lastSignature := ""
+	writeDetail := func(detail domain.ExecutionDetail) error {
+		payload, err := json.Marshal(detail)
+		if err != nil {
+			return err
+		}
+		signature := fmt.Sprintf("%s|%s|%d", detail.Execution.Status, detail.Execution.SummaryLog, len(detail.Nodes))
+		if signature == lastSignature {
+			return nil
+		}
+		lastSignature = signature
+		if _, err := fmt.Fprintf(w, "event: execution\ndata: %s\n\n", payload); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	detail, err := s.service.ExecutionDetail(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := writeDetail(detail); err != nil {
+		return
+	}
+
+	for {
+		if detail.Execution.Status != domain.ExecutionStatusRunning {
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			detail, err = s.service.ExecutionDetail(r.Context(), id)
+			if err != nil {
+				return
+			}
+			if err := writeDetail(detail); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
