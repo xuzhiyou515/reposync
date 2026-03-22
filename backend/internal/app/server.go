@@ -335,6 +335,13 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if shouldRun, reason := shouldProcessWebhook(r, body, task); !shouldRun {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"ignored": true,
+			"reason":  reason,
+		})
+		return
+	}
 	execution, runErr := s.service.RunTask(r.Context(), id, domain.TriggerWebhook)
 	if runErr != nil {
 		writeError(w, http.StatusBadRequest, runErr.Error())
@@ -398,4 +405,43 @@ func validateWebhookSignature(r *http.Request, body []byte, secret string) error
 		return fmt.Errorf("invalid github webhook signature")
 	}
 	return fmt.Errorf("missing webhook signature")
+}
+
+func shouldProcessWebhook(r *http.Request, body []byte, task domain.SyncTask) (bool, string) {
+	provider := detectWebhookProvider(r.URL.Path)
+	switch provider {
+	case domain.ProviderGitHub:
+		event := r.Header.Get("X-GitHub-Event")
+		if event != "" && event != "push" {
+			return false, "unsupported github event"
+		}
+	case domain.ProviderGogs:
+		event := r.Header.Get("X-Gogs-Event")
+		if event != "" && event != "push" {
+			return false, "unsupported gogs event"
+		}
+	}
+
+	ref := webhookRef(body)
+	if task.TriggerConfig.BranchReference != "" && ref != "" && task.TriggerConfig.BranchReference != ref {
+		return false, "branch does not match trigger config"
+	}
+	return true, ""
+}
+
+func detectWebhookProvider(path string) domain.ProviderType {
+	if strings.Contains(path, "/api/webhooks/gogs/") {
+		return domain.ProviderGogs
+	}
+	return domain.ProviderGitHub
+}
+
+func webhookRef(body []byte) string {
+	var payload struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	return payload.Ref
 }
