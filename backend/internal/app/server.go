@@ -191,6 +191,46 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
+	if len(tail) == 3 && tail[0] == "webhook-events" && tail[2] == "replay" && r.Method == http.MethodPost {
+		eventID, parseErr := strconv.ParseInt(tail[1], 10, 64)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid webhook event id")
+			return
+		}
+		event, getErr := s.store.GetWebhookEvent(r.Context(), eventID)
+		if getErr != nil {
+			writeError(w, http.StatusNotFound, getErr.Error())
+			return
+		}
+		if event.TaskID != id {
+			writeError(w, http.StatusBadRequest, "webhook event does not belong to task")
+			return
+		}
+		execution, runErr := s.service.RunTask(r.Context(), id, domain.TriggerWebhook)
+		if runErr != nil {
+			_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+				TaskID:    id,
+				Provider:  event.Provider,
+				EventType: event.EventType,
+				Ref:       event.Ref,
+				Status:    "failed",
+				Reason:    fmt.Sprintf("replay of event #%d failed: %v", eventID, runErr),
+			})
+			writeError(w, http.StatusBadRequest, runErr.Error())
+			return
+		}
+		_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+			TaskID:      id,
+			Provider:    event.Provider,
+			EventType:   event.EventType,
+			Ref:         event.Ref,
+			Status:      "accepted",
+			Reason:      fmt.Sprintf("replayed from event #%d", eventID),
+			ExecutionID: &execution.ID,
+		})
+		writeJSON(w, http.StatusAccepted, execution)
+		return
+	}
 	if len(tail) == 1 && tail[0] == "schedule-status" && r.Method == http.MethodGet {
 		task, getErr := s.service.GetTask(r.Context(), id)
 		if getErr != nil {

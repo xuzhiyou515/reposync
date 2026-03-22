@@ -651,3 +651,21 @@ LIMIT 50`, taskID)
 	}
 	return events, rows.Err()
 }
+
+func (s *Store) GetWebhookEvent(ctx context.Context, id int64) (domain.WebhookEvent, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, task_id, provider, event_type, ref, status, reason, execution_id, created_at
+FROM webhook_events
+WHERE id = ?`, id)
+	var item domain.WebhookEvent
+	var executionID sql.NullInt64
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.TaskID, &item.Provider, &item.EventType, &item.Ref, &item.Status, &item.Reason, &executionID, &createdAt); err != nil {
+		return item, err
+	}
+	if executionID.Valid {
+		item.ExecutionID = &executionID.Int64
+	}
+	item.CreatedAt = parseTime(createdAt)
+	return item, nil
+}

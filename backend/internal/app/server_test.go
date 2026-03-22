@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -187,7 +189,112 @@ func TestHandleSchedulesReturnsRegisteredStatus(t *testing.T) {
 	}
 }
 
+func TestReplayWebhookEventRunsTaskAgain(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for replay integration test")
+	}
+
+	root := t.TempDir()
+	sourceBare := filepath.Join(root, "source.git")
+	targetBare := filepath.Join(root, "target.git")
+	worktree := filepath.Join(root, "work")
+	dbPath := filepath.Join(root, "reposync.db")
+	cacheDir := filepath.Join(root, "cache")
+
+	runGitForAppTest(t, "", "init", "--bare", sourceBare)
+	runGitForAppTest(t, "", "init", "--bare", targetBare)
+	runGitForAppTest(t, "", "clone", sourceBare, worktree)
+	runGitForAppTest(t, worktree, "config", "user.name", "RepoSync Test")
+	runGitForAppTest(t, worktree, "config", "user.email", "reposync@example.com")
+	runGitForAppTest(t, worktree, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(worktree, "README.md"), []byte("main\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGitForAppTest(t, worktree, "add", ".")
+	runGitForAppTest(t, worktree, "commit", "-m", "init")
+	runGitForAppTest(t, worktree, "push", "-u", "origin", "main")
+
+	box := security.NewSecretBox("test-secret")
+	dbStore, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer dbStore.Close()
+
+	svc := service.New(dbStore, cacheDir, git.NewClient("git"), scm.NewManager())
+	server := &Server{
+		mux:       http.NewServeMux(),
+		store:     dbStore,
+		service:   svc,
+		scheduler: scheduler.New(svc),
+	}
+	defer server.scheduler.Stop()
+	server.routes()
+
+	ctx := context.Background()
+	task, err := dbStore.SaveTask(ctx, domain.SyncTask{
+		Name:          "replay-demo",
+		SourceRepoURL: sourceBare,
+		TargetRepoURL: targetBare,
+		Enabled:       true,
+		SyncAllRefs:   true,
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGitHub,
+			Visibility: domain.VisibilityPrivate,
+		},
+		TriggerConfig: domain.TriggerConfig{
+			EnableWebhook: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	event, err := dbStore.CreateWebhookEvent(ctx, domain.WebhookEvent{
+		TaskID:    task.ID,
+		Provider:  "github",
+		EventType: "push",
+		Ref:       "refs/heads/main",
+		Status:    "ignored",
+		Reason:    "branch does not match trigger config",
+	})
+	if err != nil {
+		t.Fatalf("create webhook event: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/"+strconv.FormatInt(task.ID, 10)+"/webhook-events/"+strconv.FormatInt(event.ID, 10)+"/replay", nil)
+	rec := httptest.NewRecorder()
+	server.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d with body %q", rec.Code, rec.Body.String())
+	}
+	events, err := dbStore.ListWebhookEventsForTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("list webhook events: %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected replay to append webhook event, got %d", len(events))
+	}
+	if !strings.Contains(events[0].Reason, "replayed from event") {
+		t.Fatalf("expected latest webhook event to record replay reason, got %q", events[0].Reason)
+	}
+}
+
 func filepathJoinTemp(t *testing.T, name string) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), name)
+}
+
+func runGitForAppTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
+	}
+	return string(out)
 }

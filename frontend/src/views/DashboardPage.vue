@@ -367,6 +367,47 @@ const cleanupCache = async (cache: RepoCache) => {
   await loadCaches()
 }
 
+const replayWebhookEvent = async (event: WebhookEvent) => {
+  if (executionTaskId.value == null) {
+    return
+  }
+  const execution = await api.replayWebhookEvent(executionTaskId.value, event.id)
+  ElMessage.success('Webhook 记录已重放')
+  await loadWebhookEvents(executionTaskId.value)
+  await loadExecutions(executionTaskId.value)
+  await openExecution(execution)
+}
+
+const exportWebhookEvents = () => {
+  if (!filteredWebhookEvents.value.length) {
+    ElMessage.warning('当前没有可导出的 Webhook 记录')
+    return
+  }
+  const header = ['id', 'provider', 'eventType', 'ref', 'status', 'reason', 'executionId', 'createdAt']
+  const rows = filteredWebhookEvents.value.map((item) => [
+    item.id,
+    item.provider,
+    item.eventType,
+    item.ref,
+    item.status,
+    (item.reason || '').replaceAll('"', '""'),
+    item.executionId ?? '',
+    item.createdAt,
+  ])
+  const csv = [header, ...rows]
+    .map((row) => row.map((value) => `"${String(value ?? '')}"`).join(','))
+    .join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `reposync-webhook-events-${executionTaskId.value ?? 'task'}.csv`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 const taskTriggerSummary = (task: SyncTask) => {
   const bits: string[] = []
   if (task.triggerConfig.enableSchedule) {
@@ -802,6 +843,7 @@ onBeforeUnmount(() => {
                 <strong>最近 Webhook 记录</strong>
                 <div class="history-toolbar">
                   <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先选择任务' }}</span>
+                  <el-button size="small" @click="exportWebhookEvents">导出 CSV</el-button>
                   <el-select v-model="webhookStatusFilter" size="small" class="history-filter">
                     <el-option label="全部" value="all" />
                     <el-option label="Accepted" value="accepted" />
@@ -849,10 +891,12 @@ onBeforeUnmount(() => {
                     <span :class="{ 'warning-text': row.status === 'ignored' }">{{ webhookReasonLabel(row.reason) }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="执行" width="90">
+                <el-table-column label="操作" width="160">
                   <template #default="{ row }">
-                    <el-button v-if="row.executionId" size="small" @click="openExecutionByID(row.executionId)">跳转</el-button>
-                    <span v-else class="muted-text">-</span>
+                    <div class="action-row">
+                      <el-button v-if="row.executionId" size="small" @click="openExecutionByID(row.executionId)">跳转</el-button>
+                      <el-button size="small" type="primary" plain @click="replayWebhookEvent(row)">重放</el-button>
+                    </div>
                   </template>
                 </el-table-column>
               </el-table>

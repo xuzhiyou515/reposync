@@ -153,6 +153,9 @@
 ### `POST /api/webhooks/gogs/:taskId`
 接收 Gogs Webhook，按任务配置触发同步。
 
+### `POST /api/tasks/:id/webhook-events/:eventId/replay`
+基于一条历史 Webhook 记录重新触发一次同步执行。
+
 首版建议校验：
 - 任务已启用
 - Webhook 已启用
