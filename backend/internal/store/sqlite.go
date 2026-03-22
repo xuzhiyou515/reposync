@@ -376,6 +376,17 @@ func (s *Store) DeleteCredential(ctx context.Context, id int64) error {
 	return err
 }
 
+func (s *Store) CredentialByOptionalID(ctx context.Context, id *int64) (*domain.Credential, error) {
+	if id == nil {
+		return nil, nil
+	}
+	credential, err := s.GetCredential(ctx, *id)
+	if err != nil {
+		return nil, err
+	}
+	return &credential, nil
+}
+
 func (s *Store) CreateExecution(ctx context.Context, execution domain.SyncExecution) (domain.SyncExecution, error) {
 	startedAt := time.Now().UTC()
 	execution.StartedAt = startedAt

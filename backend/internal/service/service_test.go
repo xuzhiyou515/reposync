@@ -10,6 +10,7 @@ import (
 
 	"reposync/backend/internal/domain"
 	gitclient "reposync/backend/internal/git"
+	"reposync/backend/internal/scm"
 	"reposync/backend/internal/security"
 	"reposync/backend/internal/store"
 )
@@ -62,7 +63,7 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	}
 	defer db.Close()
 
-	svc := New(db, cacheDir, gitclient.NewClient("git"))
+	svc := New(db, cacheDir, gitclient.NewClient("git"), scm.NewManager())
 	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
 		Name:                "mirror-all-refs",
 		SourceRepoURL:       sourceBare,

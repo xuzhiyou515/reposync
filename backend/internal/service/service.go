@@ -13,6 +13,7 @@ import (
 
 	"reposync/backend/internal/domain"
 	"reposync/backend/internal/git"
+	"reposync/backend/internal/scm"
 	"reposync/backend/internal/store"
 )
 
@@ -21,10 +22,11 @@ type Service struct {
 	cacheDir string
 	locks    sync.Map
 	git      *git.Client
+	scm      *scm.Manager
 }
 
-func New(db *store.Store, cacheDir string, gitClient *git.Client) *Service {
-	return &Service{store: db, cacheDir: cacheDir, git: gitClient}
+func New(db *store.Store, cacheDir string, gitClient *git.Client, scmManager *scm.Manager) *Service {
+	return &Service{store: db, cacheDir: cacheDir, git: gitClient, scm: scmManager}
 }
 
 func (s *Service) SaveTask(ctx context.Context, task domain.SyncTask) (domain.SyncTask, error) {
@@ -105,6 +107,10 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	if !task.Enabled {
 		return domain.SyncExecution{}, fmt.Errorf("task is disabled")
 	}
+	targetCredential, err := s.store.CredentialByOptionalID(ctx, task.TargetCredentialID)
+	if err != nil && err != sql.ErrNoRows {
+		return domain.SyncExecution{}, err
+	}
 
 	execution, err := s.store.CreateExecution(ctx, domain.SyncExecution{
 		TaskID:      taskID,
@@ -130,6 +136,34 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		return domain.SyncExecution{}, getErr
 	}
 
+	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, task.TargetRepoURL, task.ProviderConfig, targetCredential)
+	if createErr != nil {
+		finished := time.Now().UTC()
+		execution.Status = domain.ExecutionStatusFailed
+		execution.FinishedAt = &finished
+		execution.FailedNodeCount = 1
+		execution.SummaryLog = createErr.Error()
+		if _, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
+			ExecutionID:    execution.ID,
+			RepoPath:       "",
+			SourceRepoURL:  task.SourceRepoURL,
+			TargetRepoURL:  task.TargetRepoURL,
+			Depth:          0,
+			CacheKey:       cacheKey,
+			CacheHit:       cacheHit,
+			AutoCreated:    false,
+			CreateDuration: createDuration.Milliseconds(),
+			Status:         domain.ExecutionStatusFailed,
+			ErrorMessage:   createErr.Error(),
+		}); err != nil {
+			return domain.SyncExecution{}, err
+		}
+		if err := s.store.UpdateExecution(ctx, execution); err != nil {
+			return domain.SyncExecution{}, err
+		}
+		return execution, createErr
+	}
+
 	cacheHitFromGit, fetchDuration, fetchErr := s.git.EnsureMirror(ctx, task.SourceRepoURL, cachePath)
 	cacheHit = cacheHit || cacheHitFromGit
 	if fetchErr != nil {
@@ -150,17 +184,18 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 			LastErrorMessage: fetchErr.Error(),
 		})
 		if _, err := s.store.CreateExecutionNode(ctx, domain.SyncExecutionNode{
-			ExecutionID:   execution.ID,
-			RepoPath:      "",
-			SourceRepoURL: task.SourceRepoURL,
-			TargetRepoURL: task.TargetRepoURL,
-			Depth:         0,
-			CacheKey:      cacheKey,
-			CacheHit:      cacheHit,
-			AutoCreated:   false,
-			FetchDuration: fetchDuration.Milliseconds(),
-			Status:        domain.ExecutionStatusFailed,
-			ErrorMessage:  fetchErr.Error(),
+			ExecutionID:    execution.ID,
+			RepoPath:       "",
+			SourceRepoURL:  task.SourceRepoURL,
+			TargetRepoURL:  task.TargetRepoURL,
+			Depth:          0,
+			CacheKey:       cacheKey,
+			CacheHit:       cacheHit,
+			AutoCreated:    autoCreated,
+			CreateDuration: createDuration.Milliseconds(),
+			FetchDuration:  fetchDuration.Milliseconds(),
+			Status:         domain.ExecutionStatusFailed,
+			ErrorMessage:   fetchErr.Error(),
 		}); err != nil {
 			return domain.SyncExecution{}, err
 		}
@@ -194,7 +229,8 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		Depth:           0,
 		CacheKey:        cacheKey,
 		CacheHit:        cacheHit,
-		AutoCreated:     false,
+		AutoCreated:     autoCreated,
+		CreateDuration:  createDuration.Milliseconds(),
 		FetchDuration:   fetchDuration.Milliseconds(),
 		PushDuration:    pushDuration.Milliseconds(),
 		Status:          executionStatus(pushErr),
@@ -208,6 +244,9 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	execution.FinishedAt = &finished
 	if pushErr == nil {
 		execution.RepoCount = 1
+		if autoCreated {
+			execution.CreatedRepoCount = 1
+		}
 		execution.SummaryLog = "Mirror sync completed with all branches, tags, and refs."
 	} else {
 		execution.FailedNodeCount = 1
