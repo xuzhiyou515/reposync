@@ -15,6 +15,7 @@ const executionTaskId = ref<number | null>(null)
 const expandedNodeIds = ref<Set<number>>(new Set())
 const errorOnly = ref(false)
 const selectedNodeId = ref<number | null>(null)
+const webhookStatusFilter = ref<'all' | 'accepted' | 'ignored' | 'rejected' | 'failed' | 'blocked'>('all')
 let executionStream: EventSource | null = null
 
 const emptyTask = (): Partial<SyncTask> => ({
@@ -150,6 +151,13 @@ const selectedExecutionNode = computed(() => {
   return selectedExecution.value.nodes.find((node) => node.id === selectedNodeId.value) ?? null
 })
 
+const filteredWebhookEvents = computed(() => {
+  if (webhookStatusFilter.value === 'all') {
+    return webhookEvents.value
+  }
+  return webhookEvents.value.filter((item) => item.status === webhookStatusFilter.value)
+})
+
 const loadTasks = async () => {
   tasks.value = await api.listTasks()
 }
@@ -273,6 +281,28 @@ const runTask = async (task: SyncTask) => {
 
 const openTaskHistory = async (taskId: number) => {
   await Promise.all([loadExecutions(taskId), loadWebhookEvents(taskId)])
+}
+
+const openExecutionByID = async (executionId?: number) => {
+  if (!executionId) {
+    return
+  }
+  const execution = executions.value.find((item) => item.id === executionId)
+  if (execution) {
+    await openExecution(execution)
+    return
+  }
+  await openExecution({
+    id: executionId,
+    taskId: executionTaskId.value ?? 0,
+    triggerType: 'webhook',
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    repoCount: 0,
+    createdRepoCount: 0,
+    failedNodeCount: 0,
+    summaryLog: '',
+  })
 }
 
 const saveCredential = async () => {
@@ -665,9 +695,19 @@ onBeforeUnmount(() => {
             <div class="webhook-history">
               <div class="panel-header">
                 <strong>最近 Webhook 记录</strong>
-                <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先选择任务' }}</span>
+                <div class="history-toolbar">
+                  <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先选择任务' }}</span>
+                  <el-select v-model="webhookStatusFilter" size="small" class="history-filter">
+                    <el-option label="全部" value="all" />
+                    <el-option label="Accepted" value="accepted" />
+                    <el-option label="Ignored" value="ignored" />
+                    <el-option label="Rejected" value="rejected" />
+                    <el-option label="Failed" value="failed" />
+                    <el-option label="Blocked" value="blocked" />
+                  </el-select>
+                </div>
               </div>
-              <el-table :data="webhookEvents" height="240" empty-text="暂无 Webhook 记录">
+              <el-table :data="filteredWebhookEvents" height="260" empty-text="暂无 Webhook 记录">
                 <el-table-column prop="status" label="状态" width="100">
                   <template #default="{ row }">
                     <el-tag size="small" :type="row.status === 'accepted' ? 'success' : row.status === 'ignored' ? 'warning' : 'danger'">
@@ -677,7 +717,14 @@ onBeforeUnmount(() => {
                 </el-table-column>
                 <el-table-column prop="eventType" label="事件" width="90" />
                 <el-table-column prop="ref" label="Ref" min-width="180" />
+                <el-table-column prop="createdAt" label="时间" width="180" />
                 <el-table-column prop="reason" label="结果" min-width="220" />
+                <el-table-column label="执行" width="90">
+                  <template #default="{ row }">
+                    <el-button v-if="row.executionId" size="small" @click="openExecutionByID(row.executionId)">跳转</el-button>
+                    <span v-else class="muted-text">-</span>
+                  </template>
+                </el-table-column>
               </el-table>
             </div>
           </el-card>

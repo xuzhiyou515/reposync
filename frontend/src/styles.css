@@ -230,6 +230,17 @@ h1 {
   border-top: 1px solid rgba(29, 42, 34, 0.08);
 }
 
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.history-filter {
+  width: 140px;
+}
+
 .mono {
   font-family: "Consolas", "SFMono-Regular", monospace;
 }
