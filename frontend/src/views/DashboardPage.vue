@@ -2,11 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
+import type { Credential, ExecutionDetail, RepoCache, ScheduleStatus, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
 
 const tasks = ref<SyncTask[]>([])
 const credentials = ref<Credential[]>([])
 const caches = ref<RepoCache[]>([])
+const schedules = ref<ScheduleStatus[]>([])
 const executions = ref<SyncExecution[]>([])
 const webhookEvents = ref<WebhookEvent[]>([])
 const selectedExecution = ref<ExecutionDetail | null>(null)
@@ -171,6 +172,10 @@ const loadCaches = async () => {
   caches.value = await api.listCaches()
 }
 
+const loadSchedules = async () => {
+  schedules.value = await api.listSchedules()
+}
+
 const loadExecutions = async (taskId: number) => {
   executionTaskId.value = taskId
   executions.value = await api.listExecutions(taskId)
@@ -235,7 +240,7 @@ const ensureExecutionStreaming = () => {
 const refreshAll = async () => {
   loading.value = true
   try {
-    await Promise.all([loadTasks(), loadCredentials(), loadCaches()])
+    await Promise.all([loadTasks(), loadCredentials(), loadCaches(), loadSchedules()])
   } finally {
     loading.value = false
   }
@@ -371,6 +376,18 @@ const taskStatusType = (status?: string) => {
   return 'info'
 }
 
+const scheduleStatusType = (item: ScheduleStatus) => {
+  if (item.registered) return 'success'
+  if (!item.enabled) return 'info'
+  return 'warning'
+}
+
+const scheduleStateLabel = (item: ScheduleStatus) => {
+  if (item.registered) return '已注册'
+  if (!item.enabled) return '任务停用'
+  return '未注册'
+}
+
 const toggleNode = (nodeId: number) => {
   const next = new Set(expandedNodeIds.value)
   if (next.has(nodeId)) {
@@ -438,8 +455,9 @@ onBeforeUnmount(() => {
 
     <el-tabs class="workspace-tabs">
       <el-tab-pane label="任务">
-        <div class="content-grid">
-          <el-card shadow="never" class="panel-card">
+        <div class="stack-layout">
+          <div class="content-grid">
+            <el-card shadow="never" class="panel-card">
             <template #header>
               <div class="panel-header">
                 <span>任务表单</span>
@@ -531,9 +549,9 @@ onBeforeUnmount(() => {
               </div>
               <el-button type="primary" @click="saveTask">保存任务</el-button>
             </el-form>
-          </el-card>
+            </el-card>
 
-          <el-card shadow="never" class="panel-card">
+            <el-card shadow="never" class="panel-card">
             <template #header>
               <div class="panel-header">
                 <span>任务列表</span>
@@ -581,6 +599,40 @@ onBeforeUnmount(() => {
                     <el-button size="small" @click="openTaskHistory(row.id)">历史</el-button>
                     <el-button size="small" type="danger" @click="removeTask(row)">删除</el-button>
                   </div>
+                </template>
+              </el-table-column>
+            </el-table>
+            </el-card>
+          </div>
+
+          <el-card shadow="never" class="panel-card">
+            <template #header>
+              <div class="panel-header">
+                <span>调度状态</span>
+                <el-button text @click="loadSchedules">刷新</el-button>
+              </div>
+            </template>
+            <el-table :data="schedules" empty-text="暂无调度记录">
+              <el-table-column prop="taskName" label="任务" min-width="180" />
+              <el-table-column label="状态" width="120">
+                <template #default="{ row }">
+                  <el-tag :type="scheduleStatusType(row)">{{ scheduleStateLabel(row) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="cron" label="Cron" min-width="180" />
+              <el-table-column prop="nextRunAt" label="下次执行" min-width="180">
+                <template #default="{ row }">
+                  <span class="mono">{{ row.nextRunAt || '-' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="previousRunAt" label="上次执行" min-width="180">
+                <template #default="{ row }">
+                  <span class="mono">{{ row.previousRunAt || '-' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="reason" label="说明" min-width="220">
+                <template #default="{ row }">
+                  <span class="muted-text">{{ row.reason || (row.registered ? '调度器已注册，等待下一次触发' : '-') }}</span>
                 </template>
               </el-table-column>
             </el-table>

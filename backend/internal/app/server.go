@@ -80,6 +80,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/tasks", s.handleTasks)
 	s.mux.HandleFunc("/api/tasks/", s.handleTaskByID)
+	s.mux.HandleFunc("/api/schedules", s.handleSchedules)
 	s.mux.HandleFunc("/api/credentials", s.handleCredentials)
 	s.mux.HandleFunc("/api/credentials/", s.handleCredentialByID)
 	s.mux.HandleFunc("/api/caches", s.handleCaches)
@@ -99,6 +100,19 @@ func (s *Server) routes() {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"message": "RepoSync API is running"})
 	})
+}
+
+func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	tasks, err := s.service.ListTasksForScheduling(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.scheduler.Statuses(tasks))
 }
 
 func parseIDAndTail(raw, prefix string) (int64, []string, error) {
@@ -175,6 +189,15 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	if len(tail) == 1 && tail[0] == "schedule-status" && r.Method == http.MethodGet {
+		task, getErr := s.service.GetTask(r.Context(), id)
+		if getErr != nil {
+			writeError(w, http.StatusNotFound, getErr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, s.scheduler.Status(task))
 		return
 	}
 

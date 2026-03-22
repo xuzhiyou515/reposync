@@ -97,6 +97,11 @@ h1 {
   grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
 }
 
+.stack-layout {
+  display: grid;
+  gap: 20px;
+}
+
 .panel-header {
   display: flex;
   align-items: center;

@@ -64,7 +64,31 @@
 ### `GET /api/tasks/:id/executions`
 查看某个任务的执行历史。
 
-## 2. 执行详情接口
+### `GET /api/tasks/:id/schedule-status`
+查看单个任务当前的调度注册状态、下一次执行时间和未注册原因。
+
+## 2. 调度状态接口
+
+### `GET /api/schedules`
+返回所有任务的调度状态列表。
+
+返回示例：
+```json
+[
+  {
+    "taskId": 10,
+    "taskName": "sync-main-repo",
+    "enabled": true,
+    "registered": true,
+    "cron": "0 */30 * * * *",
+    "nextRunAt": "2026-03-22T14:30:00Z",
+    "previousRunAt": "2026-03-22T14:00:00Z",
+    "reason": ""
+  }
+]
+```
+
+## 3. 执行详情接口
 
 ### `GET /api/executions/:id`
 返回执行摘要、所属任务、执行树节点。
@@ -78,7 +102,7 @@
 }
 ```
 
-## 3. 凭证接口
+## 4. 凭证接口
 
 ### `GET /api/credentials`
 返回脱敏后的凭证列表。
@@ -103,7 +127,7 @@
 ### `DELETE /api/credentials/:id`
 删除凭证。
 
-## 4. 缓存接口
+## 5. 缓存接口
 
 ### `GET /api/caches`
 获取缓存列表。
@@ -118,7 +142,7 @@
 }
 ```
 
-## 5. Webhook 接口
+## 6. Webhook 接口
 
 ### `POST /api/webhooks/github/:taskId`
 接收 GitHub Webhook，按任务配置触发同步。
@@ -131,7 +155,7 @@
 - Webhook 已启用
 - Webhook Secret 匹配
 
-## 6. 错误响应
+## 7. 错误响应
 
 统一错误结构：
 ```json

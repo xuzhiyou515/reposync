@@ -90,6 +90,10 @@ func (s *Service) ListWebhookEvents(ctx context.Context, taskID int64) ([]domain
 	return s.store.ListWebhookEventsForTask(ctx, taskID)
 }
 
+func (s *Service) ListTasksForScheduling(ctx context.Context) ([]domain.SyncTask, error) {
+	return s.store.ListTasks(ctx)
+}
+
 func taskKey(id int64) string {
 	return fmt.Sprintf("task-%d", id)
 }

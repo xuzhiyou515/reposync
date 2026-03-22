@@ -14,6 +14,7 @@ import (
 
 	"reposync/backend/internal/domain"
 	"reposync/backend/internal/git"
+	"reposync/backend/internal/scheduler"
 	"reposync/backend/internal/scm"
 	"reposync/backend/internal/security"
 	"reposync/backend/internal/service"
@@ -122,6 +123,67 @@ func TestHandleExecutionStreamWritesEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, `"summaryLog":"line 1"`) {
 		t.Fatalf("expected execution payload in stream, got %q", body)
+	}
+}
+
+func TestHandleSchedulesReturnsRegisteredStatus(t *testing.T) {
+	db := filepathJoinTemp(t, "reposync.db")
+	box := security.NewSecretBox("test-secret")
+	dbStore, err := store.New(db, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer dbStore.Close()
+
+	svc := service.New(dbStore, filepathJoinTemp(t, "cache"), git.NewClient("git"), scm.NewManager())
+	server := &Server{
+		mux:       http.NewServeMux(),
+		store:     dbStore,
+		service:   svc,
+		scheduler: scheduler.New(svc),
+	}
+	defer server.scheduler.Stop()
+	server.routes()
+
+	ctx := context.Background()
+	task, err := dbStore.SaveTask(ctx, domain.SyncTask{
+		Name:          "scheduled-demo",
+		SourceRepoURL: "src",
+		TargetRepoURL: "dst",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGitHub,
+			Visibility: domain.VisibilityPrivate,
+		},
+		TriggerConfig: domain.TriggerConfig{
+			EnableSchedule: true,
+			Cron:           "*/30 * * * * *",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if err := server.scheduler.SyncTask(task); err != nil {
+		t.Fatalf("sync task into scheduler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/schedules", nil)
+	rec := httptest.NewRecorder()
+	server.mux.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", rec.Code, body)
+	}
+	if !strings.Contains(body, `"taskId":`+strconv.FormatInt(task.ID, 10)) {
+		t.Fatalf("expected schedule payload to include task id, got %q", body)
+	}
+	if !strings.Contains(body, `"registered":true`) {
+		t.Fatalf("expected schedule payload to mark registered, got %q", body)
+	}
+	if !strings.Contains(body, `"cron":"*/30 * * * * *"`) {
+		t.Fatalf("expected schedule payload to include cron, got %q", body)
 	}
 }
 

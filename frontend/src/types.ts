@@ -110,3 +110,14 @@ export interface WebhookEvent {
   executionId?: number
   createdAt: string
 }
+
+export interface ScheduleStatus {
+  taskId: number
+  taskName: string
+  enabled: boolean
+  registered: boolean
+  cron: string
+  nextRunAt?: string
+  previousRunAt?: string
+  reason?: string
+}

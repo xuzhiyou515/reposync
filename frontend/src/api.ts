@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncTask, WebhookEvent } from './types'
+import type { Credential, ExecutionDetail, RepoCache, ScheduleStatus, SyncExecution, SyncTask, WebhookEvent } from './types'
 
 const http = axios.create({
   baseURL: '/api',
@@ -17,6 +17,7 @@ export const api = {
   deleteTask: async (id: number) => {
     await http.delete(`/tasks/${id}`)
   },
+  listSchedules: async () => (await http.get<ScheduleStatus[]>('/schedules')).data,
   runTask: async (id: number) => (await http.post<SyncExecution>(`/tasks/${id}/run`)).data,
   listExecutions: async (id: number) => (await http.get<SyncExecution[]>(`/tasks/${id}/executions`)).data,
   listWebhookEvents: async (id: number) => (await http.get<WebhookEvent[]>(`/tasks/${id}/webhook-events`)).data,

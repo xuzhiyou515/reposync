@@ -152,3 +152,14 @@ type WebhookEvent struct {
 	ExecutionID *int64    `json:"executionId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
+
+type ScheduleStatus struct {
+	TaskID      int64      `json:"taskId"`
+	TaskName    string     `json:"taskName"`
+	Enabled     bool       `json:"enabled"`
+	Registered  bool       `json:"registered"`
+	Cron        string     `json:"cron"`
+	NextRunAt   *time.Time `json:"nextRunAt,omitempty"`
+	PreviousRun *time.Time `json:"previousRunAt,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
+}
