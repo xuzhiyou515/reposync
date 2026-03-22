@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
 import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask } from '../types'
@@ -14,6 +14,7 @@ const executionTaskId = ref<number | null>(null)
 const expandedNodeIds = ref<Set<number>>(new Set())
 const errorOnly = ref(false)
 const selectedNodeId = ref<number | null>(null)
+let executionPollTimer: number | null = null
 
 const emptyTask = (): Partial<SyncTask> => ({
   name: '',
@@ -165,6 +166,41 @@ const loadExecutions = async (taskId: number) => {
   executions.value = await api.listExecutions(taskId)
 }
 
+const stopExecutionPolling = () => {
+  if (executionPollTimer != null) {
+    window.clearInterval(executionPollTimer)
+    executionPollTimer = null
+  }
+}
+
+const refreshSelectedExecution = async () => {
+  if (!selectedExecution.value) {
+    return
+  }
+  const detail = await api.executionDetail(selectedExecution.value.execution.id)
+  selectedExecution.value = detail
+  if (selectedNodeId.value == null) {
+    selectedNodeId.value = detail.nodes[0]?.id ?? null
+  }
+  if (detail.execution.status !== 'running') {
+    stopExecutionPolling()
+    if (executionTaskId.value != null) {
+      await loadExecutions(executionTaskId.value)
+    }
+    await loadTasks()
+  }
+}
+
+const ensureExecutionPolling = () => {
+  stopExecutionPolling()
+  if (!selectedExecution.value || selectedExecution.value.execution.status !== 'running') {
+    return
+  }
+  executionPollTimer = window.setInterval(() => {
+    void refreshSelectedExecution()
+  }, 2000)
+}
+
 const refreshAll = async () => {
   loading.value = true
   try {
@@ -204,10 +240,11 @@ const removeTask = async (task: SyncTask) => {
 }
 
 const runTask = async (task: SyncTask) => {
-  await api.runTask(task.id)
+  const execution = await api.runTask(task.id)
   ElMessage.success('任务已触发')
   await refreshAll()
   await loadExecutions(task.id)
+  await openExecution(execution)
 }
 
 const saveCredential = async () => {
@@ -232,6 +269,7 @@ const openExecution = async (execution: SyncExecution) => {
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
   errorOnly.value = false
   selectedNodeId.value = selectedExecution.value.nodes[0]?.id ?? null
+  ensureExecutionPolling()
 }
 
 const cleanupCache = async (cache: RepoCache) => {
@@ -301,6 +339,10 @@ const selectNode = (nodeId: number) => {
 
 onMounted(async () => {
   await refreshAll()
+})
+
+onBeforeUnmount(() => {
+  stopExecutionPolling()
 })
 </script>
 
@@ -600,12 +642,24 @@ onMounted(async () => {
             <div v-if="selectedExecution" class="detail-stack">
               <div class="detail-block">
                 <strong>{{ selectedExecution.task.name }}</strong>
-                <p>{{ selectedExecution.execution.summaryLog }}</p>
+                <p>
+                  {{ selectedExecution.execution.status === 'running' ? '执行中，日志每 2 秒自动刷新。' : '执行结束，以下为本次摘要日志。' }}
+                </p>
                 <div class="summary-tags">
                   <el-tag size="small">trigger: {{ selectedExecution.execution.triggerType }}</el-tag>
                   <el-tag size="small">repos: {{ selectedExecution.execution.repoCount }}</el-tag>
                   <el-tag size="small">created: {{ selectedExecution.execution.createdRepoCount }}</el-tag>
                 </div>
+              </div>
+
+              <div class="detail-block log-panel">
+                <div class="panel-header">
+                  <strong>执行日志</strong>
+                  <el-tag size="small" :type="taskStatusType(selectedExecution.execution.status)">
+                    {{ selectedExecution.execution.status }}
+                  </el-tag>
+                </div>
+                <pre class="log-output">{{ selectedExecution.execution.summaryLog || '等待日志输出...' }}</pre>
               </div>
 
               <div class="status-grid">

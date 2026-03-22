@@ -118,6 +118,9 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if !detail.Nodes[0].CacheHit {
 		t.Fatalf("expected second run to hit cache")
 	}
+	if !strings.Contains(detail.Execution.SummaryLog, "Refreshing mirror cache") {
+		t.Fatalf("expected execution summary log to include progress output, got:\n%s", detail.Execution.SummaryLog)
+	}
 }
 
 func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
