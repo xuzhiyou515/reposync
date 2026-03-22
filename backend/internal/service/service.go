@@ -86,6 +86,10 @@ func (s *Service) ExecutionDetail(ctx context.Context, id int64) (domain.Executi
 	return s.store.GetExecutionDetail(ctx, id)
 }
 
+func (s *Service) ListWebhookEvents(ctx context.Context, taskID int64) ([]domain.WebhookEvent, error) {
+	return s.store.ListWebhookEventsForTask(ctx, taskID)
+}
+
 func taskKey(id int64) string {
 	return fmt.Sprintf("task-%d", id)
 }

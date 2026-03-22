@@ -139,3 +139,15 @@ type ExecutionDetail struct {
 	Task      SyncTask            `json:"task"`
 	Nodes     []SyncExecutionNode `json:"nodes"`
 }
+
+type WebhookEvent struct {
+	ID          int64     `json:"id"`
+	TaskID      int64     `json:"taskId"`
+	Provider    string    `json:"provider"`
+	EventType   string    `json:"eventType"`
+	Ref         string    `json:"ref"`
+	Status      string    `json:"status"`
+	Reason      string    `json:"reason"`
+	ExecutionID *int64    `json:"executionId,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+}

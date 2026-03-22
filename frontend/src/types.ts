@@ -97,3 +97,15 @@ export interface ExecutionDetail {
   task: SyncTask
   nodes: SyncExecutionNode[]
 }
+
+export interface WebhookEvent {
+  id: number
+  taskId: number
+  provider: string
+  eventType: string
+  ref: string
+  status: string
+  reason: string
+  executionId?: number
+  createdAt: string
+}

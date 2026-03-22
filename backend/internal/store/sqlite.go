@@ -112,6 +112,17 @@ CREATE TABLE IF NOT EXISTS repo_caches (
   size_bytes INTEGER NOT NULL DEFAULT 0,
   health_status TEXT NOT NULL DEFAULT 'ready',
   last_error_message TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS webhook_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  event_type TEXT NOT NULL DEFAULT '',
+  ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  execution_id INTEGER,
+  created_at TEXT NOT NULL
 );`)
 	return err
 }
@@ -577,4 +588,47 @@ func (s *Store) DeleteCache(ctx context.Context, id int64) error {
 		return errors.New("cache not found")
 	}
 	return nil
+}
+
+func (s *Store) CreateWebhookEvent(ctx context.Context, event domain.WebhookEvent) (domain.WebhookEvent, error) {
+	now := time.Now().UTC()
+	event.CreatedAt = now
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO webhook_events (task_id, provider, event_type, ref, status, reason, execution_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.TaskID, event.Provider, event.EventType, event.Ref, event.Status, event.Reason, event.ExecutionID, timeString(now),
+	)
+	if err != nil {
+		return domain.WebhookEvent{}, err
+	}
+	event.ID, _ = res.LastInsertId()
+	return event, nil
+}
+
+func (s *Store) ListWebhookEventsForTask(ctx context.Context, taskID int64) ([]domain.WebhookEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, task_id, provider, event_type, ref, status, reason, execution_id, created_at
+FROM webhook_events
+WHERE task_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 50`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []domain.WebhookEvent
+	for rows.Next() {
+		var item domain.WebhookEvent
+		var executionID sql.NullInt64
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.Provider, &item.EventType, &item.Ref, &item.Status, &item.Reason, &executionID, &createdAt); err != nil {
+			return nil, err
+		}
+		if executionID.Valid {
+			item.ExecutionID = &executionID.Int64
+		}
+		item.CreatedAt = parseTime(createdAt)
+		events = append(events, item)
+	}
+	return events, rows.Err()
 }

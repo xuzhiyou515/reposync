@@ -168,6 +168,15 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
+	if len(tail) == 1 && tail[0] == "webhook-events" && r.Method == http.MethodGet {
+		items, listErr := s.service.ListWebhookEvents(r.Context(), id)
+		if listErr != nil {
+			writeError(w, http.StatusInternalServerError, listErr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -389,20 +398,46 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, taskErr.Error())
 		return
 	}
-	if !task.Enabled || !task.TriggerConfig.EnableWebhook {
-		writeError(w, http.StatusForbidden, "webhook is disabled for this task")
-		return
-	}
+	provider := string(detectWebhookProvider(r.URL.Path))
+	eventType := webhookEventType(r)
 	body, readErr := io.ReadAll(r.Body)
 	if readErr != nil {
 		writeError(w, http.StatusBadRequest, "failed to read webhook body")
 		return
 	}
+	if !task.Enabled || !task.TriggerConfig.EnableWebhook {
+		_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+			TaskID:    id,
+			Provider:  provider,
+			EventType: eventType,
+			Ref:       webhookRef(body),
+			Status:    "blocked",
+			Reason:    "webhook is disabled for this task",
+		})
+		writeError(w, http.StatusForbidden, "webhook is disabled for this task")
+		return
+	}
 	if err := validateWebhookSignature(r, body, task.TriggerConfig.WebhookSecret); err != nil {
+		_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+			TaskID:    id,
+			Provider:  provider,
+			EventType: eventType,
+			Ref:       webhookRef(body),
+			Status:    "rejected",
+			Reason:    err.Error(),
+		})
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	if shouldRun, reason := shouldProcessWebhook(r, body, task); !shouldRun {
+		_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+			TaskID:    id,
+			Provider:  provider,
+			EventType: eventType,
+			Ref:       webhookRef(body),
+			Status:    "ignored",
+			Reason:    reason,
+		})
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"ignored": true,
 			"reason":  reason,
@@ -411,9 +446,26 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	execution, runErr := s.service.RunTask(r.Context(), id, domain.TriggerWebhook)
 	if runErr != nil {
+		_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+			TaskID:    id,
+			Provider:  provider,
+			EventType: eventType,
+			Ref:       webhookRef(body),
+			Status:    "failed",
+			Reason:    runErr.Error(),
+		})
 		writeError(w, http.StatusBadRequest, runErr.Error())
 		return
 	}
+	_, _ = s.store.CreateWebhookEvent(r.Context(), domain.WebhookEvent{
+		TaskID:      id,
+		Provider:    provider,
+		EventType:   eventType,
+		Ref:         webhookRef(body),
+		Status:      "accepted",
+		Reason:      "execution started",
+		ExecutionID: &execution.ID,
+	})
 	writeJSON(w, http.StatusAccepted, execution)
 }
 
@@ -511,4 +563,14 @@ func webhookRef(body []byte) string {
 		return ""
 	}
 	return payload.Ref
+}
+
+func webhookEventType(r *http.Request) string {
+	if event := r.Header.Get("X-GitHub-Event"); event != "" {
+		return event
+	}
+	if event := r.Header.Get("X-Gogs-Event"); event != "" {
+		return event
+	}
+	return "push"
 }

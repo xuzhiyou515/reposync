@@ -2,12 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask } from '../types'
+import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
 
 const tasks = ref<SyncTask[]>([])
 const credentials = ref<Credential[]>([])
 const caches = ref<RepoCache[]>([])
 const executions = ref<SyncExecution[]>([])
+const webhookEvents = ref<WebhookEvent[]>([])
 const selectedExecution = ref<ExecutionDetail | null>(null)
 const loading = ref(false)
 const executionTaskId = ref<number | null>(null)
@@ -166,6 +167,10 @@ const loadExecutions = async (taskId: number) => {
   executions.value = await api.listExecutions(taskId)
 }
 
+const loadWebhookEvents = async (taskId: number) => {
+  webhookEvents.value = await api.listWebhookEvents(taskId)
+}
+
 const stopExecutionStreaming = () => {
   if (executionStream) {
     executionStream.close()
@@ -252,6 +257,7 @@ const removeTask = async (task: SyncTask) => {
   await refreshAll()
   if (executionTaskId.value === task.id) {
     executions.value = []
+    webhookEvents.value = []
     selectedExecution.value = null
   }
 }
@@ -261,7 +267,12 @@ const runTask = async (task: SyncTask) => {
   ElMessage.success('任务已触发')
   await refreshAll()
   await loadExecutions(task.id)
+  await loadWebhookEvents(task.id)
   await openExecution(execution)
+}
+
+const openTaskHistory = async (taskId: number) => {
+  await Promise.all([loadExecutions(taskId), loadWebhookEvents(taskId)])
 }
 
 const saveCredential = async () => {
@@ -533,7 +544,7 @@ onBeforeUnmount(() => {
                   <div class="action-row">
                     <el-button size="small" @click="editTask(row)">编辑</el-button>
                     <el-button size="small" type="primary" @click="runTask(row)">执行</el-button>
-                    <el-button size="small" @click="loadExecutions(row.id)">历史</el-button>
+                    <el-button size="small" @click="openTaskHistory(row.id)">历史</el-button>
                     <el-button size="small" type="danger" @click="removeTask(row)">删除</el-button>
                   </div>
                 </template>
@@ -650,6 +661,25 @@ onBeforeUnmount(() => {
                 </template>
               </el-table-column>
             </el-table>
+
+            <div class="webhook-history">
+              <div class="panel-header">
+                <strong>最近 Webhook 记录</strong>
+                <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先选择任务' }}</span>
+              </div>
+              <el-table :data="webhookEvents" height="240" empty-text="暂无 Webhook 记录">
+                <el-table-column prop="status" label="状态" width="100">
+                  <template #default="{ row }">
+                    <el-tag size="small" :type="row.status === 'accepted' ? 'success' : row.status === 'ignored' ? 'warning' : 'danger'">
+                      {{ row.status }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="eventType" label="事件" width="90" />
+                <el-table-column prop="ref" label="Ref" min-width="180" />
+                <el-table-column prop="reason" label="结果" min-width="220" />
+              </el-table>
+            </div>
           </el-card>
 
           <el-card shadow="never" class="panel-card">
