@@ -62,7 +62,7 @@ h1 {
 .stats-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .stat-card,
@@ -127,9 +127,80 @@ h1 {
   gap: 16px;
 }
 
+.summary-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
 .detail-block p {
   margin: 8px 0 0;
   color: var(--muted);
+}
+
+.mono {
+  font-family: "Consolas", "SFMono-Regular", monospace;
+}
+
+.tree-list {
+  display: grid;
+  gap: 12px;
+}
+
+.tree-row {
+  border: 1px solid rgba(29, 42, 34, 0.08);
+  border-radius: 18px;
+  background: rgba(243, 247, 241, 0.78);
+  padding: 14px 16px;
+}
+
+.tree-left {
+  display: flex;
+  gap: 12px;
+}
+
+.tree-branches {
+  width: 16px;
+  min-width: 16px;
+  border-left: 2px solid rgba(31, 122, 90, 0.18);
+}
+
+.branch-empty {
+  border-left-color: transparent;
+}
+
+.tree-node {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tree-title {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tree-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tree-paths {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.error-text {
+  color: #a0432f;
 }
 
 @media (max-width: 1024px) {

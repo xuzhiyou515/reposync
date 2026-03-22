@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncTask } from '../types'
+import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask } from '../types'
 
 const tasks = ref<SyncTask[]>([])
 const credentials = ref<Credential[]>([])
@@ -50,7 +50,46 @@ const taskSummary = computed(() => ({
   total: tasks.value.length,
   enabled: tasks.value.filter((item) => item.enabled).length,
   recursive: tasks.value.filter((item) => item.recursiveSubmodules).length,
+  scheduled: tasks.value.filter((item) => item.triggerConfig.enableSchedule).length,
 }))
+
+type TreeRow = SyncExecutionNode & {
+  label: string
+  branchClass: string
+}
+
+const executionTreeRows = computed<TreeRow[]>(() => {
+  if (!selectedExecution.value) {
+    return []
+  }
+  const childrenByParent = new Map<number | null, SyncExecutionNode[]>()
+  for (const node of selectedExecution.value.nodes) {
+    const parent = node.parentNodeId ?? null
+    const list = childrenByParent.get(parent) ?? []
+    list.push(node)
+    childrenByParent.set(parent, list)
+  }
+
+  const result: TreeRow[] = []
+  const visit = (parentId: number | null, prefix: boolean[]) => {
+    const children = childrenByParent.get(parentId) ?? []
+    children.forEach((node, index) => {
+      const isLast = index === children.length - 1
+      const branchClass = prefix
+        .map((active) => (active ? 'branch-continue' : 'branch-empty'))
+        .join(' ')
+      result.push({
+        ...node,
+        label: node.repoPath || '(root)',
+        branchClass,
+      })
+      visit(node.id, [...prefix, !isLast])
+    })
+  }
+
+  visit(null, [])
+  return result
+})
 
 const loadTasks = async () => {
   tasks.value = await api.listTasks()
@@ -141,6 +180,24 @@ const cleanupCache = async (cache: RepoCache) => {
   await loadCaches()
 }
 
+const taskTriggerSummary = (task: SyncTask) => {
+  const bits: string[] = []
+  if (task.triggerConfig.enableSchedule) {
+    bits.push(`Schedule: ${task.triggerConfig.cron || 'unset'}`)
+  }
+  if (task.triggerConfig.enableWebhook) {
+    bits.push(`Webhook: ${task.triggerConfig.webhookSecret ? 'signed' : 'unsigned'}`)
+  }
+  return bits.length ? bits.join(' | ') : 'Manual only'
+}
+
+const taskStatusType = (status?: string) => {
+  if (status === 'success') return 'success'
+  if (status === 'failed') return 'danger'
+  if (status === 'running') return 'warning'
+  return 'info'
+}
+
 onMounted(async () => {
   await refreshAll()
 })
@@ -153,7 +210,8 @@ onMounted(async () => {
         <p class="eyebrow">RepoSync</p>
         <h1>Git 镜像同步控制台</h1>
         <p class="hero-copy">
-          从 roadmap 的基础阶段开始，当前已经打通任务、凭证、缓存和手动执行记录的管理闭环。同步语义固定为镜像所有分支、标签和其他 refs。
+          当前版本已经覆盖任务管理、真实 mirror 执行、自动建仓、递归子模块同步、定时调度和 Webhook 鉴权。
+          这一版页面重点把调度状态和递归执行树展示出来，方便判断同步链路是否健康。
         </p>
       </div>
       <div class="stats-grid">
@@ -167,7 +225,11 @@ onMounted(async () => {
         </div>
         <div class="stat-card">
           <strong>{{ taskSummary.recursive }}</strong>
-          <span>递归同步</span>
+          <span>递归任务</span>
+        </div>
+        <div class="stat-card">
+          <strong>{{ taskSummary.scheduled }}</strong>
+          <span>启用调度</span>
         </div>
       </div>
     </section>
@@ -186,10 +248,10 @@ onMounted(async () => {
               <el-form-item label="任务名称">
                 <el-input v-model="taskForm.name" />
               </el-form-item>
-              <el-form-item label="源仓库">
+              <el-form-item label="源仓库 URL">
                 <el-input v-model="taskForm.sourceRepoUrl" placeholder="git@github.com:org/repo.git" />
               </el-form-item>
-              <el-form-item label="目标仓库">
+              <el-form-item label="目标仓库 URL">
                 <el-input v-model="taskForm.targetRepoUrl" placeholder="git@gogs.example.com:mirror/repo.git" />
               </el-form-item>
               <div class="two-column">
@@ -205,7 +267,7 @@ onMounted(async () => {
                 </el-form-item>
               </div>
               <div class="two-column">
-                <el-form-item label="Provider">
+                <el-form-item label="目标平台">
                   <el-select v-model="taskForm.providerConfig!.provider">
                     <el-option label="GitHub" value="github" />
                     <el-option label="Gogs" value="gogs" />
@@ -223,7 +285,7 @@ onMounted(async () => {
                   </el-select>
                 </el-form-item>
                 <el-form-item label="API Base URL">
-                  <el-input v-model="taskForm.providerConfig!.baseApiUrl" />
+                  <el-input v-model="taskForm.providerConfig!.baseApiUrl" placeholder="Optional" />
                 </el-form-item>
               </div>
               <el-form-item label="描述模板">
@@ -258,17 +320,30 @@ onMounted(async () => {
                 <el-button text :loading="loading" @click="refreshAll">刷新</el-button>
               </div>
             </template>
-            <el-table :data="tasks" height="560">
+            <el-table :data="tasks" height="620">
               <el-table-column prop="name" label="任务" min-width="180" />
-              <el-table-column prop="providerConfig.provider" label="Provider" width="110" />
-              <el-table-column label="状态" width="120">
+              <el-table-column label="同步" width="120">
                 <template #default="{ row }">
-                  <el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+                  <el-tag :type="row.recursiveSubmodules ? 'success' : 'info'">
+                    {{ row.recursiveSubmodules ? '递归' : '单仓库' }}
+                  </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="最近执行" min-width="160">
+              <el-table-column label="调度 / Webhook" min-width="220">
                 <template #default="{ row }">
-                  {{ row.lastExecutionStatus || '尚未执行' }}
+                  <span class="mono muted-text">{{ taskTriggerSummary(row) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="最近执行" width="130">
+                <template #default="{ row }">
+                  <el-tag :type="taskStatusType(row.lastExecutionStatus)">
+                    {{ row.lastExecutionStatus || 'none' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="仓库 / 建仓" width="120">
+                <template #default="{ row }">
+                  {{ row.lastExecutionRepoCount || 0 }} / {{ row.lastCreatedRepoCount || 0 }}
                 </template>
               </el-table-column>
               <el-table-column label="操作" width="260">
@@ -325,10 +400,11 @@ onMounted(async () => {
             <template #header>
               <span>凭证列表</span>
             </template>
-            <el-table :data="credentials" height="560">
+            <el-table :data="credentials" height="620">
               <el-table-column prop="name" label="名称" min-width="180" />
               <el-table-column prop="type" label="类型" width="140" />
-              <el-table-column prop="secretMasked" label="脱敏值" min-width="180" />
+              <el-table-column prop="scope" label="用途" min-width="180" />
+              <el-table-column prop="secretMasked" label="脱敏值" min-width="160" />
               <el-table-column label="操作" width="180">
                 <template #default="{ row }">
                   <div class="action-row">
@@ -350,9 +426,9 @@ onMounted(async () => {
               <el-button text @click="loadCaches">刷新</el-button>
             </div>
           </template>
-          <el-table :data="caches" height="560">
+          <el-table :data="caches" height="620">
             <el-table-column prop="sourceRepoUrl" label="源仓库" min-width="280" />
-            <el-table-column prop="cachePath" label="缓存路径" min-width="220" />
+            <el-table-column prop="cachePath" label="缓存路径" min-width="260" />
             <el-table-column prop="healthStatus" label="健康状态" width="120" />
             <el-table-column prop="hitCount" label="命中次数" width="100" />
             <el-table-column label="操作" width="120">
@@ -370,14 +446,21 @@ onMounted(async () => {
             <template #header>
               <div class="panel-header">
                 <span>执行历史</span>
-                <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先从任务页选择一个任务' }}</span>
+                <span class="muted-text">
+                  {{ executionTaskId ? `任务 #${executionTaskId}` : '先从任务页选择一个任务' }}
+                </span>
               </div>
             </template>
-            <el-table :data="executions" height="560">
-              <el-table-column prop="status" label="状态" width="120" />
-              <el-table-column prop="triggerType" label="触发方式" width="120" />
+            <el-table :data="executions" height="620">
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="taskStatusType(row.status)">{{ row.status }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="triggerType" label="触发方式" width="110" />
               <el-table-column prop="repoCount" label="仓库数" width="90" />
               <el-table-column prop="createdRepoCount" label="建仓数" width="90" />
+              <el-table-column prop="failedNodeCount" label="失败节点" width="100" />
               <el-table-column prop="startedAt" label="开始时间" min-width="180" />
               <el-table-column label="操作" width="120">
                 <template #default="{ row }">
@@ -395,15 +478,39 @@ onMounted(async () => {
               <div class="detail-block">
                 <strong>{{ selectedExecution.task.name }}</strong>
                 <p>{{ selectedExecution.execution.summaryLog }}</p>
+                <div class="summary-tags">
+                  <el-tag size="small">trigger: {{ selectedExecution.execution.triggerType }}</el-tag>
+                  <el-tag size="small">repos: {{ selectedExecution.execution.repoCount }}</el-tag>
+                  <el-tag size="small">created: {{ selectedExecution.execution.createdRepoCount }}</el-tag>
+                </div>
               </div>
-              <el-table :data="selectedExecution.nodes">
-                <el-table-column prop="repoPath" label="路径" min-width="140" />
-                <el-table-column prop="status" label="状态" width="100" />
-                <el-table-column prop="cacheKey" label="缓存键" min-width="170" />
-                <el-table-column prop="autoCreated" label="自动建仓" width="100" />
-                <el-table-column prop="fetchDurationMs" label="Fetch(ms)" width="100" />
-                <el-table-column prop="pushDurationMs" label="Push(ms)" width="100" />
-              </el-table>
+
+              <div class="tree-list">
+                <div v-for="node in executionTreeRows" :key="node.id" class="tree-row">
+                  <div class="tree-left">
+                    <div class="tree-branches" :class="node.branchClass"></div>
+                    <div class="tree-node">
+                      <div class="tree-title">
+                        <span class="mono">{{ node.label }}</span>
+                        <el-tag size="small" :type="taskStatusType(node.status)">{{ node.status }}</el-tag>
+                      </div>
+                      <div class="tree-meta">
+                        <span>depth {{ node.depth }}</span>
+                        <span>cache {{ node.cacheHit ? 'hit' : 'miss' }}</span>
+                        <span>auto-create {{ node.autoCreated ? 'yes' : 'no' }}</span>
+                        <span>fetch {{ node.fetchDurationMs }}ms</span>
+                        <span>push {{ node.pushDurationMs }}ms</span>
+                      </div>
+                      <div class="tree-paths mono">
+                        <div>src: {{ node.sourceRepoUrl }}</div>
+                        <div>dst: {{ node.targetRepoUrl }}</div>
+                        <div v-if="node.referenceCommit">ref: {{ node.referenceCommit }}</div>
+                        <div v-if="node.errorMessage" class="error-text">error: {{ node.errorMessage }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
             <el-empty v-else description="暂无执行详情" />
           </el-card>
