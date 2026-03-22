@@ -35,6 +35,9 @@ export interface SyncTask {
   syncAllRefs: boolean
   triggerConfig: TriggerConfig
   providerConfig: ProviderConfig
+  scheduleCron?: string
+  nextRunAt?: string
+  lastExecutionId?: number
   lastExecutionStatus?: string
   lastExecutionAt?: string
   lastExecutionRepoCount?: number
@@ -113,15 +116,4 @@ export interface WebhookEvent {
   reason: string
   executionId?: number
   createdAt: string
-}
-
-export interface ScheduleStatus {
-  taskId: number
-  taskName: string
-  enabled: boolean
-  registered: boolean
-  cron: string
-  nextRunAt?: string
-  previousRunAt?: string
-  reason?: string
 }

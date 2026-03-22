@@ -143,25 +143,12 @@
 | `executionId` | integer nullable | 关联执行 |
 | `createdAt` | datetime | 记录时间 |
 
-## 7. ScheduleStatus
+## 7. ????????
 
-调度器对单任务的注册状态快照。
+?????????????????????????????
 
-| 字段 | 类型 | 说明 |
+| ?? | ?? | ?? |
 | --- | --- | --- |
-| `taskId` | integer | 任务 ID |
-| `taskName` | string | 任务名称 |
-| `enabled` | boolean | 任务是否启用 |
-| `registered` | boolean | 是否已注册到调度器 |
-| `cron` | string | Cron 表达式 |
-| `nextRunAt` | datetime nullable | 下一次执行时间 |
-| `previousRunAt` | datetime nullable | 上一次执行时间 |
-| `reason` | string | 未注册原因或补充说明 |
+| `scheduleCron` | string | ????? Cron ?????????? |
+| `nextRunAt` | datetime nullable | ??????????????????????? |
 
-## 8. 关系说明
-
-- 一个 `SyncTask` 有多条 `SyncExecution`
-- 一条 `SyncExecution` 有多条 `SyncExecutionNode`
-- 一个 `SyncTask` 可关联多个 `Credential`
-- 多个任务可共享同一 `Credential`
-- 多次执行可共享同一 `RepoCache`

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +226,22 @@ func resolveCacheBase(defaultBase string, taskBase string) string {
 	return filepath.Join(defaultBase, base)
 }
 
+func dirSize(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil || entry == nil || entry.IsDir() {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
+}
+
 type executionCounters struct {
 	repoCount        int
 	createdRepoCount int
@@ -249,6 +266,12 @@ type executionState struct {
 	nextID      int
 }
 
+var east8Location = time.FixedZone("CST", 8*60*60)
+
+func east8Now() time.Time {
+	return time.Now().In(east8Location)
+}
+
 type executionLogger struct {
 	store     *store.Store
 	execution *domain.SyncExecution
@@ -260,7 +283,8 @@ func (l *executionLogger) log(ctx context.Context, format string, args ...any) {
 	if l == nil || l.execution == nil {
 		return
 	}
-	line := fmt.Sprintf("%s  %s", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	now := east8Now()
+	line := fmt.Sprintf("%s  %s", now.Format(time.RFC3339), fmt.Sprintf(format, args...))
 	if strings.TrimSpace(l.execution.SummaryLog) == "" {
 		l.execution.SummaryLog = line
 	} else {
@@ -269,7 +293,6 @@ func (l *executionLogger) log(ctx context.Context, format string, args ...any) {
 	if l.onUpdate != nil {
 		l.onUpdate(*l.execution)
 	}
-	now := time.Now().UTC()
 	if l.lastFlush.IsZero() || now.Sub(l.lastFlush) >= 400*time.Millisecond ||
 		strings.Contains(line, "Execution started") ||
 		strings.Contains(line, "Execution failed") ||
@@ -287,7 +310,7 @@ func (l *executionLogger) flush(ctx context.Context) {
 		l.onUpdate(*l.execution)
 	}
 	_ = l.store.UpdateExecution(ctx, *l.execution)
-	l.lastFlush = time.Now().UTC()
+	l.lastFlush = east8Now()
 }
 
 func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.TriggerType) (domain.SyncExecution, error) {
@@ -405,7 +428,7 @@ func (s *Service) executeTask(ctx context.Context, task domain.SyncTask, trigger
 	})
 	_, runErr := s.syncRepository(ctx, gitClient, execution.ID, task, "", task.SourceRepoURL, task.TargetRepoURL, "", 0, nil, rootCredentials, submoduleCredentials, visited, counters, logger)
 
-	finished := time.Now().UTC()
+	finished := east8Now()
 	execution.FinishedAt = &finished
 	execution.RepoCount = counters.repoCount
 	execution.CreatedRepoCount = counters.createdRepoCount
@@ -496,6 +519,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 
 	logger.log(ctx, "Refreshing mirror cache for %s", nodeLabel)
 	cacheHitFromGit, fetchDuration, fetchErr := gitClient.EnsureMirror(ctx, sourceRepoURL, cachePath, currentCredentials.Source)
+	cacheSize := dirSize(cachePath)
 	node.CacheHit = node.CacheHit || cacheHitFromGit
 	node.FetchDuration = fetchDuration.Milliseconds()
 	if fetchErr != nil {
@@ -511,6 +535,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			LastFetchAt:      &now,
 			LastUsedAt:       &now,
 			HitCount:         hitCount,
+			SizeBytes:        cacheSize,
 			HealthStatus:     "broken",
 			LastErrorMessage: fetchErr.Error(),
 		})
@@ -526,6 +551,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		LastFetchAt:   &now,
 		LastUsedAt:    &now,
 		HitCount:      hitCount,
+		SizeBytes:     cacheSize,
 		HealthStatus:  "ready",
 	})
 	cacheState := "cache miss"

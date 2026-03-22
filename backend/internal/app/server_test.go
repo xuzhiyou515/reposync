@@ -214,7 +214,7 @@ func TestServeEmbeddedFrontendWhenExternalDistMissing(t *testing.T) {
 	}
 }
 
-func TestHandleSchedulesReturnsRegisteredStatus(t *testing.T) {
+func TestHandleTasksIncludesScheduleFields(t *testing.T) {
 	db := filepathJoinTemp(t, "reposync.db")
 	box := security.NewSecretBox("test-secret")
 	dbStore, err := store.New(db, box)
@@ -256,7 +256,7 @@ func TestHandleSchedulesReturnsRegisteredStatus(t *testing.T) {
 		t.Fatalf("sync task into scheduler: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/schedules", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
 	rec := httptest.NewRecorder()
 	server.mux.ServeHTTP(rec, req)
 
@@ -264,14 +264,11 @@ func TestHandleSchedulesReturnsRegisteredStatus(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d with body %q", rec.Code, body)
 	}
-	if !strings.Contains(body, `"taskId":`+strconv.FormatInt(task.ID, 10)) {
-		t.Fatalf("expected schedule payload to include task id, got %q", body)
+	if !strings.Contains(body, `"scheduleCron":"*/30 * * * * *"`) {
+		t.Fatalf("expected task payload to include schedule cron, got %q", body)
 	}
-	if !strings.Contains(body, `"registered":true`) {
-		t.Fatalf("expected schedule payload to mark registered, got %q", body)
-	}
-	if !strings.Contains(body, `"cron":"*/30 * * * * *"`) {
-		t.Fatalf("expected schedule payload to include cron, got %q", body)
+	if !strings.Contains(body, `"nextRunAt":"`) {
+		t.Fatalf("expected task payload to include nextRunAt, got %q", body)
 	}
 }
 

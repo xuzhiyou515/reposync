@@ -58,7 +58,7 @@ func TestSyncTaskRemovesDisabledSchedule(t *testing.T) {
 	}
 }
 
-func TestStatusReportsRegisteredSchedule(t *testing.T) {
+func TestEnrichTaskReportsRegisteredSchedule(t *testing.T) {
 	s := New(fakeRunner{})
 	defer s.Stop()
 
@@ -75,23 +75,20 @@ func TestStatusReportsRegisteredSchedule(t *testing.T) {
 		t.Fatalf("sync task: %v", err)
 	}
 
-	status := s.Status(task)
-	if !status.Registered {
-		t.Fatalf("expected schedule to be registered")
+	enriched := s.EnrichTask(task)
+	if enriched.ScheduleCron != task.TriggerConfig.Cron {
+		t.Fatalf("expected schedule cron %q, got %q", task.TriggerConfig.Cron, enriched.ScheduleCron)
 	}
-	if status.NextRunAt == nil {
+	if enriched.NextRunAt == nil {
 		t.Fatalf("expected next run to be populated")
-	}
-	if status.Reason != "" {
-		t.Fatalf("expected empty reason for registered schedule, got %q", status.Reason)
 	}
 }
 
-func TestStatusReportsDisabledReason(t *testing.T) {
+func TestEnrichTaskClearsScheduleFieldsWhenDisabled(t *testing.T) {
 	s := New(fakeRunner{})
 	defer s.Stop()
 
-	status := s.Status(domain.SyncTask{
+	enriched := s.EnrichTask(domain.SyncTask{
 		ID:      8,
 		Name:    "disabled-task",
 		Enabled: false,
@@ -100,10 +97,10 @@ func TestStatusReportsDisabledReason(t *testing.T) {
 			Cron:           "*/30 * * * * *",
 		},
 	})
-	if status.Registered {
-		t.Fatalf("expected disabled schedule not to be registered")
+	if enriched.ScheduleCron != "" {
+		t.Fatalf("expected disabled task schedule cron to be empty, got %q", enriched.ScheduleCron)
 	}
-	if status.Reason == "" {
-		t.Fatalf("expected disabled reason")
+	if enriched.NextRunAt != nil {
+		t.Fatalf("expected disabled task next run to be empty")
 	}
 }

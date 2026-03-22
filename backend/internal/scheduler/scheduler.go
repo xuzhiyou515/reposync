@@ -85,57 +85,44 @@ func (s *Scheduler) JobCount() int {
 	return len(s.entries)
 }
 
-func (s *Scheduler) Status(task domain.SyncTask) domain.ScheduleStatus {
+func (s *Scheduler) EnrichTask(task domain.SyncTask) domain.SyncTask {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	status := domain.ScheduleStatus{
-		TaskID:   task.ID,
-		TaskName: task.Name,
-		Enabled:  task.Enabled,
-		Cron:     task.TriggerConfig.Cron,
-	}
+	task.ScheduleCron = ""
+	task.NextRunAt = nil
 
 	if !task.Enabled {
-		status.Reason = "task is disabled"
-		return status
+		return task
 	}
 	if !task.TriggerConfig.EnableSchedule {
-		status.Reason = "schedule is disabled"
-		return status
+		return task
 	}
 	if strings.TrimSpace(task.TriggerConfig.Cron) == "" {
-		status.Reason = "cron expression is empty"
-		return status
+		return task
 	}
+	task.ScheduleCron = task.TriggerConfig.Cron
 
 	entryID, ok := s.entries[task.ID]
 	if !ok {
-		status.Reason = "schedule is not registered"
-		return status
+		return task
 	}
 
 	entry := s.cron.Entry(entryID)
-	status.Registered = entry.Valid()
 	if !entry.Valid() {
-		status.Reason = "schedule entry is invalid"
-		return status
+		return task
 	}
 	if !entry.Next.IsZero() {
 		next := entry.Next.In(time.Local)
-		status.NextRunAt = &next
+		task.NextRunAt = &next
 	}
-	if !entry.Prev.IsZero() {
-		prev := entry.Prev.In(time.Local)
-		status.PreviousRun = &prev
-	}
-	return status
+	return task
 }
 
-func (s *Scheduler) Statuses(tasks []domain.SyncTask) []domain.ScheduleStatus {
-	items := make([]domain.ScheduleStatus, 0, len(tasks))
+func (s *Scheduler) EnrichTasks(tasks []domain.SyncTask) []domain.SyncTask {
+	items := make([]domain.SyncTask, 0, len(tasks))
 	for _, task := range tasks {
-		items = append(items, s.Status(task))
+		items = append(items, s.EnrichTask(task))
 	}
 	return items
 }

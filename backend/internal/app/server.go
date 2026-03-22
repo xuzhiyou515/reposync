@@ -89,7 +89,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/tasks", s.handleTasks)
 	s.mux.HandleFunc("/api/tasks/", s.handleTaskByID)
-	s.mux.HandleFunc("/api/schedules", s.handleSchedules)
 	s.mux.HandleFunc("/api/credentials", s.handleCredentials)
 	s.mux.HandleFunc("/api/credentials/", s.handleCredentialByID)
 	s.mux.HandleFunc("/api/caches", s.handleCaches)
@@ -118,19 +117,6 @@ func (s *Server) routes() {
 	})
 }
 
-func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	tasks, err := s.service.ListTasksForScheduling(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, s.scheduler.Statuses(tasks))
-}
-
 func parseIDAndTail(raw, prefix string) (int64, []string, error) {
 	trimmed := strings.Trim(strings.TrimPrefix(raw, prefix), "/")
 	parts := strings.Split(trimmed, "/")
@@ -152,7 +138,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		writeJSON(w, http.StatusOK, s.attachScheduleFields(items))
 	case http.MethodPost:
 		var task domain.SyncTask
 		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
@@ -172,6 +158,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) attachScheduleFields(tasks []domain.SyncTask) []domain.SyncTask {
+	if len(tasks) == 0 || s.scheduler == nil {
+		return tasks
+	}
+	return s.scheduler.EnrichTasks(tasks)
 }
 
 func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
@@ -247,16 +240,6 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, execution)
 		return
 	}
-	if len(tail) == 1 && tail[0] == "schedule-status" && r.Method == http.MethodGet {
-		task, getErr := s.service.GetTask(r.Context(), id)
-		if getErr != nil {
-			writeError(w, http.StatusNotFound, getErr.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, s.scheduler.Status(task))
-		return
-	}
-
 	switch r.Method {
 	case http.MethodPut:
 		var task domain.SyncTask

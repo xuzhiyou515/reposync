@@ -25,6 +25,8 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+var east8Location = time.FixedZone("CST", 8*60*60)
+
 func New(path string, box *security.SecretBox) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -192,7 +194,7 @@ func nullableTime(value *time.Time) any {
 
 func parseTime(raw string) time.Time {
 	parsed, _ := time.Parse(time.RFC3339Nano, raw)
-	return parsed
+	return parsed.In(east8Location)
 }
 
 func parseNullableTime(raw sql.NullString) *time.Time {
@@ -219,6 +221,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	var enabled, recursive, syncAll int
 	var triggerJSON, providerJSON string
 	var createdAt, updatedAt string
+	var lastExecutionID sql.NullInt64
 	var lastStatus string
 	var lastStarted sql.NullString
 	var lastRepoCount, lastCreatedCount int
@@ -231,7 +234,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 			&enabled, &recursive, &syncAll,
 			&triggerJSON, &providerJSON,
 			&createdAt, &updatedAt,
-			&lastStatus, &lastStarted, &lastRepoCount, &lastCreatedCount,
+			&lastExecutionID, &lastStatus, &lastStarted, &lastRepoCount, &lastCreatedCount,
 		)
 	} else {
 		err = row.Scan(
@@ -272,6 +275,9 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	_ = json.Unmarshal([]byte(triggerJSON), &task.TriggerConfig)
 	_ = json.Unmarshal([]byte(providerJSON), &task.ProviderConfig)
 	if withLatest {
+		if lastExecutionID.Valid {
+			task.LastExecutionID = &lastExecutionID.Int64
+		}
 		task.LastExecutionStatus = lastStatus
 		task.LastExecutionAt = parseNullableTime(lastStarted)
 		task.LastExecutionRepoCount = lastRepoCount
@@ -337,7 +343,7 @@ func (s *Store) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {
 SELECT
   t.id, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.submodule_source_credential_id, t.target_credential_id, t.submodule_target_credential_id, t.target_api_credential_id, t.submodule_target_api_credential_id,
   t.enabled, t.recursive_submodules, t.sync_all_refs, t.trigger_config, t.provider_config, t.created_at, t.updated_at,
-  COALESCE(e.status, ''), e.started_at, COALESCE(e.repo_count, 0), COALESCE(e.created_repo_count, 0)
+  e.id, COALESCE(e.status, ''), e.started_at, COALESCE(e.repo_count, 0), COALESCE(e.created_repo_count, 0)
 FROM sync_tasks t
 LEFT JOIN sync_executions e ON e.id = (
   SELECT se.id FROM sync_executions se WHERE se.task_id = t.id ORDER BY se.started_at DESC LIMIT 1
@@ -462,7 +468,7 @@ func (s *Store) CredentialByOptionalID(ctx context.Context, id *int64) (*domain.
 
 func (s *Store) CreateExecution(ctx context.Context, execution domain.SyncExecution) (domain.SyncExecution, error) {
 	startedAt := time.Now().UTC()
-	execution.StartedAt = startedAt
+	execution.StartedAt = startedAt.In(east8Location)
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO sync_executions (task_id, trigger_type, status, started_at, repo_count, created_repo_count, failed_node_count, summary_log)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -654,7 +660,7 @@ func (s *Store) DeleteCache(ctx context.Context, id int64) error {
 
 func (s *Store) CreateWebhookEvent(ctx context.Context, event domain.WebhookEvent) (domain.WebhookEvent, error) {
 	now := time.Now().UTC()
-	event.CreatedAt = now
+	event.CreatedAt = now.In(east8Location)
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO webhook_events (task_id, provider, event_type, ref, status, reason, execution_id, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,

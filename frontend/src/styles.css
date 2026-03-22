@@ -249,10 +249,13 @@ h1 {
   align-items: center;
   gap: 10px;
   min-height: 22px;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .task-trigger-line strong {
   font-size: 13px;
+  font-weight: 600;
 }
 
 .task-trigger-label {
@@ -260,6 +263,45 @@ h1 {
   flex: 0 0 56px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.task-trigger-value {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  word-break: break-all;
+}
+
+.recent-execution-cell {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.recent-execution-time {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.recent-execution-button {
+  padding: 0 !important;
+  height: auto !important;
+  border-radius: 999px;
+  transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+}
+
+.recent-execution-button .el-tag {
+  cursor: pointer;
+}
+
+.recent-execution-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(0.98);
+}
+
+.recent-execution-button:hover .el-tag {
+  box-shadow: 0 6px 16px rgba(29, 42, 34, 0.12);
 }
 
 .trigger-tags {
@@ -461,6 +503,7 @@ h1 {
 }
 
 .tree-panel {
+  min-width: 0;
   padding: 10px;
   border: 1px solid rgba(29, 42, 34, 0.08);
   border-radius: 18px;
@@ -482,6 +525,7 @@ h1 {
 .tree-node-card {
   display: grid;
   gap: 8px;
+  min-width: 0;
   width: 100%;
   padding: 14px 16px;
   border: 1px solid rgba(29, 42, 34, 0.08);
@@ -512,13 +556,17 @@ h1 {
 .tree-paths {
   display: grid;
   gap: 4px;
+  min-width: 0;
   color: var(--muted);
   font-size: 12px;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .error-text {
   color: #a0432f;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .warning-text {
@@ -528,6 +576,7 @@ h1 {
 .node-detail-card {
   display: grid;
   gap: 16px;
+  min-width: 0;
   align-self: start;
   padding: 18px;
   border-radius: 18px;

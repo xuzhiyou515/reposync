@@ -5,12 +5,11 @@ import { ElMessage } from 'element-plus'
 import type { ElTree } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '../api'
-import type { Credential, ExecutionDetail, RepoCache, ScheduleStatus, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
+import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
 
 const tasks = ref<SyncTask[]>([])
 const credentials = ref<Credential[]>([])
 const caches = ref<RepoCache[]>([])
-const schedules = ref<ScheduleStatus[]>([])
 const executions = ref<SyncExecution[]>([])
 const webhookEvents = ref<WebhookEvent[]>([])
 const selectedExecution = ref<ExecutionDetail | null>(null)
@@ -273,10 +272,6 @@ const loadCaches = async () => {
   caches.value = await api.listCaches()
 }
 
-const loadSchedules = async () => {
-  schedules.value = await api.listSchedules()
-}
-
 const loadExecutions = async (taskId: number) => {
   executionTaskId.value = taskId
   executions.value = (await api.listExecutions(taskId)) ?? []
@@ -325,7 +320,7 @@ const applyExecutionDetail = async (detail: ExecutionDetail) => {
     if (executionTaskId.value != null) {
       await loadExecutions(executionTaskId.value)
     }
-    await loadTasks()
+    await Promise.all([loadTasks(), loadCaches()])
   }
 }
 
@@ -400,7 +395,7 @@ const ensureExecutionStreaming = () => {
 const refreshAll = async () => {
   loading.value = true
   try {
-    await Promise.all([loadTasks(), loadCredentials(), loadCaches(), loadSchedules()])
+    await Promise.all([loadTasks(), loadCredentials(), loadCaches()])
   } finally {
     loading.value = false
   }
@@ -650,29 +645,18 @@ const exportWebhookEvents = () => {
   URL.revokeObjectURL(url)
 }
 
-const taskTriggerModes = (task: SyncTask) => {
-  const modes = ['手动']
-  if (task.triggerConfig.enableSchedule) {
-    modes.push('定时')
-  }
-  if (task.triggerConfig.enableWebhook) {
-    modes.push('Webhook')
-  }
-  return modes.join(' / ')
-}
-
-const taskScheduleSummary = (task: SyncTask) => {
+const taskCronDisplay = (task: SyncTask) => {
   if (!task.triggerConfig.enableSchedule) {
-    return '已关闭'
+    return '-'
   }
-  return task.triggerConfig.cron || '已启用'
+  return task.scheduleCron || task.triggerConfig.cron || '-'
 }
 
-const taskWebhookSummary = (task: SyncTask) => {
-  if (!task.triggerConfig.enableWebhook) {
-    return '已关闭'
+const taskNextRunDisplay = (task: SyncTask) => {
+  if (!task.triggerConfig.enableSchedule) {
+    return '-'
   }
-  return task.triggerConfig.webhookSecret ? '已启用（已签名）' : '已启用（未签名）'
+  return formatEast8DateTime(task.nextRunAt)
 }
 
 const taskScheduleState = (task: SyncTask) => {
@@ -698,16 +682,54 @@ const taskStatusType = (status?: string) => {
   return 'info'
 }
 
-const scheduleStatusType = (item: ScheduleStatus) => {
-  if (item.registered) return 'success'
-  if (!item.enabled) return 'info'
-  return 'warning'
+const formatBytes = (value?: number) => {
+  if (!value || value <= 0) {
+    return '0 B'
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = value
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  const precision = unitIndex === 0 ? 0 : size >= 10 ? 1 : 2
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
 }
 
-const scheduleStateLabel = (item: ScheduleStatus) => {
-  if (item.registered) return '已注册'
-  if (!item.enabled) return '任务停用'
-  return '未注册'
+const formatTaskListTime = (value?: string) => {
+  if (!value) return '未执行'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
+const formatEast8DateTime = (value?: string, empty = '-') => {
+  if (!value) return empty
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
 }
 
 const webhookEventStatusType = (status?: string) => {
@@ -828,38 +850,40 @@ onBeforeUnmount(() => {
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="触发配置" min-width="340">
+                <el-table-column label="Cron" min-width="170">
                   <template #default="{ row }">
-                    <div class="task-trigger-cell">
-                      <div class="task-trigger-line">
-                        <span class="task-trigger-label">触发方式</span>
-                        <strong>{{ taskTriggerModes(row) }}</strong>
-                      </div>
-                      <div class="task-trigger-line">
-                        <span class="task-trigger-label">定时</span>
-                        <span class="mono">{{ taskScheduleSummary(row) }}</span>
-                      </div>
-                      <div class="task-trigger-line">
-                        <span class="task-trigger-label">Webhook</span>
-                        <span>{{ taskWebhookSummary(row) }}</span>
-                      </div>
-                      <div class="task-trigger-line">
-                        <span class="task-trigger-label">分支</span>
-                        <span class="mono">{{ taskBranchState(row) }}</span>
-                      </div>
+                    <span class="task-trigger-value">{{ taskCronDisplay(row) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="下次执行" min-width="180">
+                  <template #default="{ row }">
+                    <span class="mono">{{ taskNextRunDisplay(row) }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="最近执行" width="190">
+                  <template #default="{ row }">
+                    <div class="recent-execution-cell">
+                      <span class="recent-execution-time">{{ formatTaskListTime(row.lastExecutionAt) }}</span>
+                      <el-button
+                        v-if="row.lastExecutionId"
+                        size="small"
+                        text
+                        class="recent-execution-button"
+                        @click="openExecutionByID(row.lastExecutionId)"
+                      >
+                        <el-tag :type="taskStatusType(row.lastExecutionStatus)">
+                          {{ row.lastExecutionStatus || '未执行' }}
+                        </el-tag>
+                      </el-button>
+                      <el-tag v-else :type="taskStatusType(row.lastExecutionStatus)">
+                        {{ row.lastExecutionStatus || '未执行' }}
+                      </el-tag>
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="最近执行" width="130">
+                <el-table-column label="总仓库数" width="100">
                   <template #default="{ row }">
-                    <el-tag :type="taskStatusType(row.lastExecutionStatus)">
-                      {{ row.lastExecutionStatus || '未执行' }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="仓库 / 建仓" width="120">
-                  <template #default="{ row }">
-                    {{ row.lastExecutionRepoCount || 0 }} / {{ row.lastCreatedRepoCount || 0 }}
+                    {{ row.lastExecutionRepoCount || 0 }}
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="280" align="center">
@@ -876,38 +900,6 @@ onBeforeUnmount(() => {
             </el-card>
           </div>
 
-          <el-card shadow="never" class="panel-card panel-card-wide">
-            <template #header>
-              <div class="panel-header">
-                <span>调度状态</span>
-                <el-button text @click="loadSchedules">刷新</el-button>
-              </div>
-            </template>
-            <el-table :data="schedules" empty-text="暂无调度记录">
-              <el-table-column prop="taskName" label="任务" min-width="180" />
-              <el-table-column label="状态" width="120">
-                <template #default="{ row }">
-                  <el-tag :type="scheduleStatusType(row)">{{ scheduleStateLabel(row) }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="cron" label="Cron" min-width="180" />
-              <el-table-column prop="nextRunAt" label="下次执行" min-width="180">
-                <template #default="{ row }">
-                  <span class="mono">{{ row.nextRunAt || '-' }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="previousRunAt" label="上次执行" min-width="180">
-                <template #default="{ row }">
-                  <span class="mono">{{ row.previousRunAt || '-' }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="reason" label="说明" min-width="220">
-                <template #default="{ row }">
-                  <span class="muted-text">{{ row.reason || (row.registered ? '调度器已注册，等待下一次触发' : '-') }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-          </el-card>
         </div>
       </el-tab-pane>
 
@@ -952,6 +944,11 @@ onBeforeUnmount(() => {
             <el-table-column prop="cachePath" label="缓存路径" min-width="260" />
             <el-table-column prop="healthStatus" label="健康状态" width="120" />
             <el-table-column prop="hitCount" label="命中次数" width="100" />
+            <el-table-column label="占用空间" width="120">
+              <template #default="{ row }">
+                {{ formatBytes(row.sizeBytes) }}
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="120">
               <template #default="{ row }">
                 <el-button size="small" type="danger" @click="cleanupCache(row)">清理</el-button>
@@ -965,12 +962,6 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="executionHistoryVisible" :title="executionHistoryTitle" width="1240px" destroy-on-close>
       <div class="history-dialog-body">
-        <div class="panel-header">
-          <span>执行历史</span>
-          <span class="muted-text">
-            {{ executionTaskId ? `任务 #${executionTaskId}` : '请先从任务列表进入' }}
-          </span>
-        </div>
         <el-table :data="executions" max-height="420">
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
@@ -981,7 +972,16 @@ onBeforeUnmount(() => {
           <el-table-column prop="repoCount" label="仓库数" width="90" />
           <el-table-column prop="createdRepoCount" label="建仓数" width="90" />
           <el-table-column prop="failedNodeCount" label="失败节点" width="100" />
-          <el-table-column prop="startedAt" label="开始时间" min-width="180" />
+          <el-table-column label="开始时间" min-width="180">
+            <template #default="{ row }">
+              <span class="mono">{{ formatEast8DateTime(row.startedAt) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="结束时间" min-width="180">
+            <template #default="{ row }">
+              <span class="mono">{{ formatEast8DateTime(row.finishedAt) }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="120">
             <template #default="{ row }">
               <el-button size="small" @click="openExecution(row)">详情</el-button>
@@ -1023,7 +1023,7 @@ onBeforeUnmount(() => {
             </div>
             <p>{{ webhookReasonLabel(latestIgnoredWebhook.reason) }}</p>
             <span class="muted-text mono">
-              {{ latestIgnoredWebhook.ref || '无 ref' }} · {{ latestIgnoredWebhook.createdAt }}
+              {{ latestIgnoredWebhook.ref || '无 ref' }} · {{ formatEast8DateTime(latestIgnoredWebhook.createdAt) }}
             </span>
           </div>
           <el-table :data="filteredWebhookEvents" max-height="280" empty-text="暂无 Webhook 记录">
@@ -1036,7 +1036,11 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column prop="eventType" label="事件" width="90" />
             <el-table-column prop="ref" label="Ref" min-width="180" />
-            <el-table-column prop="createdAt" label="时间" width="180" />
+            <el-table-column label="时间" width="180">
+              <template #default="{ row }">
+                <span class="mono">{{ formatEast8DateTime(row.createdAt) }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="结果" min-width="260">
               <template #default="{ row }">
                 <span :class="{ 'warning-text': row.status === 'ignored' }">{{ webhookReasonLabel(row.reason) }}</span>

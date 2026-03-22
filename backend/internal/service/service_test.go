@@ -112,6 +112,9 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if caches[0].HitCount < 2 {
 		t.Fatalf("expected cache hit count >= 2, got %d", caches[0].HitCount)
 	}
+	if caches[0].SizeBytes <= 0 {
+		t.Fatalf("expected cache size bytes to be greater than 0, got %d", caches[0].SizeBytes)
+	}
 	if !strings.HasPrefix(caches[0].CachePath, customCacheDir) {
 		t.Fatalf("expected cache path under custom cache dir %s, got %s", customCacheDir, caches[0].CachePath)
 	}
