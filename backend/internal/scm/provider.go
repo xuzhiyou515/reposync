@@ -86,6 +86,9 @@ func (p *githubProvider) EnsureRepository(ctx context.Context, targetRepoURL str
 		createURL = fmt.Sprintf("%s/user/repos", apiBase)
 	}
 	if err := createRepository(ctx, p.client, createURL, payload, credential); err != nil {
+		if isAlreadyExists(err) {
+			return false, time.Since(started), nil
+		}
 		return false, 0, err
 	}
 	return true, time.Since(started), nil
@@ -119,6 +122,9 @@ func (p *gogsProvider) EnsureRepository(ctx context.Context, targetRepoURL strin
 	}
 	createURL := fmt.Sprintf("%s/admin/users/%s/repos", apiBase, owner)
 	if err := createRepository(ctx, p.client, createURL, payload, credential); err != nil {
+		if isAlreadyExists(err) {
+			return false, time.Since(started), nil
+		}
 		return false, 0, err
 	}
 	return true, time.Since(started), nil
@@ -168,6 +174,18 @@ func (e httpError) Error() string {
 func isNotFound(err error) bool {
 	httpErr, ok := err.(httpError)
 	return ok && httpErr.statusCode == http.StatusNotFound
+}
+
+func isAlreadyExists(err error) bool {
+	httpErr, ok := err.(httpError)
+	if !ok {
+		return false
+	}
+	if httpErr.statusCode != http.StatusConflict && httpErr.statusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(httpErr.message))
+	return strings.Contains(message, "already exists") || strings.Contains(message, "name has been taken") || strings.Contains(message, "repository exists")
 }
 
 func applyAuth(req *http.Request, credential *domain.Credential) {
