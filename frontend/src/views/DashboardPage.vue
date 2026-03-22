@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import axios from 'axios'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { ElTree } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '../api'
 import type { Credential, ExecutionDetail, RepoCache, ScheduleStatus, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
 
@@ -13,7 +15,13 @@ const executions = ref<SyncExecution[]>([])
 const webhookEvents = ref<WebhookEvent[]>([])
 const selectedExecution = ref<ExecutionDetail | null>(null)
 const loading = ref(false)
+const taskDialogVisible = ref(false)
+const credentialDialogVisible = ref(false)
+const executionHistoryVisible = ref(false)
+const executionDetailVisible = ref(false)
+const executionDetailLoading = ref(false)
 const executionTaskId = ref<number | null>(null)
+const runningTaskId = ref<number | null>(null)
 const expandedNodeIds = ref<Set<number>>(new Set())
 const errorOnly = ref(false)
 const selectedNodeId = ref<number | null>(null)
@@ -21,8 +29,13 @@ const webhookStatusFilter = ref<'all' | 'accepted' | 'ignored' | 'rejected' | 'f
 let executionStream: EventSource | null = null
 let executionSocket: WebSocket | null = null
 const executionTreeRef = ref<InstanceType<typeof ElTree>>()
+const taskFormRef = ref<FormInstance>()
+const credentialSecretMasked = ref('')
+const credentialSecretOriginal = ref('')
+const credentialSecretDirty = ref(false)
 
 const emptyTask = (): Partial<SyncTask> => ({
+  id: undefined,
   name: '',
   sourceRepoUrl: '',
   targetRepoUrl: '',
@@ -51,6 +64,7 @@ const emptyTask = (): Partial<SyncTask> => ({
 })
 
 const emptyCredential = (): Partial<Credential> => ({
+  id: undefined,
   name: '',
   type: 'api_token',
   username: '',
@@ -61,6 +75,63 @@ const emptyCredential = (): Partial<Credential> => ({
 const taskForm = reactive<Partial<SyncTask>>(emptyTask())
 const credentialForm = reactive<Partial<Credential>>(emptyCredential())
 
+const repositoryValueValidator = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    callback(new Error('该字段不能为空'))
+    return
+  }
+  const looksLikeRepo =
+    /^(https?:\/\/|ssh:\/\/|git@|file:\/\/)/.test(trimmed) ||
+    /^[A-Za-z]:\\/.test(trimmed) ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('../')
+  if (!looksLikeRepo) {
+    callback(new Error('请输入有效的仓库地址或本地路径'))
+    return
+  }
+  callback()
+}
+
+const taskTargetValidator = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  repositoryValueValidator(_rule, value, (error) => {
+    if (error) {
+      callback(error)
+      return
+    }
+    if (value?.trim() === taskForm.sourceRepoUrl?.trim()) {
+      callback(new Error('目标仓库不能与源仓库相同'))
+      return
+    }
+    callback()
+  })
+}
+
+const conditionalCronValidator = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  if (taskForm.triggerConfig?.enableSchedule && !value?.trim()) {
+    callback(new Error('启用定时后必须填写 Cron'))
+    return
+  }
+  callback()
+}
+
+const conditionalWebhookSecretValidator = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  if (taskForm.triggerConfig?.enableWebhook && !value?.trim()) {
+    callback(new Error('启用 Webhook 后必须填写 Secret'))
+    return
+  }
+  callback()
+}
+
+const taskFormRules = reactive<FormRules>({
+  name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
+  sourceRepoUrl: [{ validator: repositoryValueValidator, trigger: 'blur' }],
+  targetRepoUrl: [{ validator: taskTargetValidator, trigger: 'blur' }],
+  'triggerConfig.cron': [{ validator: conditionalCronValidator, trigger: 'blur' }],
+  'triggerConfig.webhookSecret': [{ validator: conditionalWebhookSecretValidator, trigger: 'blur' }],
+})
+
 const taskSummary = computed(() => ({
   total: tasks.value.length,
   enabled: tasks.value.filter((item) => item.enabled).length,
@@ -68,9 +139,19 @@ const taskSummary = computed(() => ({
   scheduled: tasks.value.filter((item) => item.triggerConfig.enableSchedule).length,
 }))
 
+const taskDialogTitle = computed(() => (taskForm.id ? '编辑任务' : '新增任务'))
+const credentialDialogTitle = computed(() => (credentialForm.id ? '编辑凭证' : '新增凭证'))
+const executionHistoryTitle = computed(() => {
+  if (executionTaskId.value == null) {
+    return '执行历史'
+  }
+  const task = tasks.value.find((item) => item.id === executionTaskId.value)
+  return task ? `${task.name} · 执行历史` : `任务 #${executionTaskId.value} · 执行历史`
+})
+
 const taskFormTriggerCards = computed(() => [
   {
-    label: 'Schedule',
+    label: '定时计划',
     value: taskForm.triggerConfig?.enableSchedule ? taskForm.triggerConfig.cron || '已启用' : '未启用',
   },
   {
@@ -78,12 +159,12 @@ const taskFormTriggerCards = computed(() => [
     value: taskForm.triggerConfig?.enableWebhook ? (taskForm.triggerConfig.webhookSecret ? '已签名' : '未签名') : '未启用',
   },
   {
-    label: 'Branch Filter',
+    label: '分支过滤',
     value: taskForm.triggerConfig?.branchReference || '未限制',
   },
   {
-    label: 'Mirror Scope',
-    value: taskForm.syncAllRefs ? 'all refs' : 'custom',
+    label: '镜像范围',
+    value: taskForm.syncAllRefs ? '全部 refs' : '自定义',
   },
 ])
 
@@ -170,11 +251,11 @@ const webhookStatusCards = computed(() => {
     }
   }
   return [
-    { label: 'Accepted', value: String(counts.accepted), status: 'accepted' },
-    { label: 'Ignored', value: String(counts.ignored), status: 'ignored' },
-    { label: 'Rejected', value: String(counts.rejected), status: 'rejected' },
-    { label: 'Failed', value: String(counts.failed), status: 'failed' },
-    { label: 'Blocked', value: String(counts.blocked), status: 'blocked' },
+    { label: '已接受', value: String(counts.accepted), status: 'accepted' },
+    { label: '已忽略', value: String(counts.ignored), status: 'ignored' },
+    { label: '已拒绝', value: String(counts.rejected), status: 'rejected' },
+    { label: '失败', value: String(counts.failed), status: 'failed' },
+    { label: '已阻止', value: String(counts.blocked), status: 'blocked' },
   ]
 })
 
@@ -198,11 +279,23 @@ const loadSchedules = async () => {
 
 const loadExecutions = async (taskId: number) => {
   executionTaskId.value = taskId
-  executions.value = await api.listExecutions(taskId)
+  executions.value = (await api.listExecutions(taskId)) ?? []
 }
 
 const loadWebhookEvents = async (taskId: number) => {
-  webhookEvents.value = await api.listWebhookEvents(taskId)
+  webhookEvents.value = (await api.listWebhookEvents(taskId)) ?? []
+}
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (axios.isAxiosError(error)) {
+    const payloadMessage = (error.response?.data as { error?: string; message?: string } | undefined)?.error
+      || (error.response?.data as { error?: string; message?: string } | undefined)?.message
+    return payloadMessage || error.message || fallback
+  }
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+  return fallback
 }
 
 const stopExecutionStreaming = () => {
@@ -314,46 +407,97 @@ const refreshAll = async () => {
 }
 
 const resetTaskForm = () => {
+  for (const key of Object.keys(taskForm)) {
+    delete (taskForm as Record<string, unknown>)[key]
+  }
   Object.assign(taskForm, emptyTask())
 }
 
 const resetCredentialForm = () => {
+  for (const key of Object.keys(credentialForm)) {
+    delete (credentialForm as Record<string, unknown>)[key]
+  }
   Object.assign(credentialForm, emptyCredential())
+  credentialSecretMasked.value = ''
+  credentialSecretOriginal.value = ''
+  credentialSecretDirty.value = false
+}
+
+const openCreateTask = () => {
+  resetTaskForm()
+  taskDialogVisible.value = true
+  void nextTick(() => taskFormRef.value?.clearValidate())
+}
+
+const openCreateCredential = () => {
+  resetCredentialForm()
+  credentialDialogVisible.value = true
 }
 
 const saveTask = async () => {
+  const valid = await taskFormRef.value?.validate().catch(() => false)
+  if (!valid) {
+    ElMessage.warning('请先修正任务表单中的必填项')
+    return
+  }
   await api.saveTask(taskForm)
   ElMessage.success('任务已保存')
   resetTaskForm()
+  taskDialogVisible.value = false
+  taskFormRef.value?.clearValidate()
   await refreshAll()
 }
 
 const editTask = (task: SyncTask) => {
   Object.assign(taskForm, JSON.parse(JSON.stringify(task)))
+  taskDialogVisible.value = true
+  void nextTick(() => taskFormRef.value?.clearValidate())
 }
 
 const removeTask = async (task: SyncTask) => {
   await api.deleteTask(task.id)
+  tasks.value = tasks.value.filter((item) => item.id !== task.id)
+  schedules.value = schedules.value.filter((item) => item.taskId !== task.id)
   ElMessage.success('任务已删除')
-  await refreshAll()
   if (executionTaskId.value === task.id) {
+    executionTaskId.value = null
     executions.value = []
     webhookEvents.value = []
     selectedExecution.value = null
+    executionHistoryVisible.value = false
+    executionDetailVisible.value = false
+    stopExecutionStreaming()
   }
+  await refreshAll()
 }
 
 const runTask = async (task: SyncTask) => {
-  const execution = await api.runTask(task.id)
-  ElMessage.success('任务已触发')
-  await refreshAll()
-  await loadExecutions(task.id)
-  await loadWebhookEvents(task.id)
-  await openExecution(execution)
+  runningTaskId.value = task.id
+  executionDetailVisible.value = true
+  executionDetailLoading.value = true
+  selectedExecution.value = null
+  selectedNodeId.value = null
+  expandedNodeIds.value = new Set()
+  try {
+    const execution = await api.runTask(task.id)
+    ElMessage.success('任务已触发')
+    await openExecutionLive(task, execution)
+    await Promise.all([
+      refreshAll(),
+      loadExecutions(task.id),
+      loadWebhookEvents(task.id),
+    ])
+  } catch (error) {
+    executionDetailVisible.value = false
+    ElMessage.error(`执行失败：${getErrorMessage(error, '无法启动任务')}`)
+  } finally {
+    runningTaskId.value = null
+  }
 }
 
 const openTaskHistory = async (taskId: number) => {
   await Promise.all([loadExecutions(taskId), loadWebhookEvents(taskId)])
+  executionHistoryVisible.value = true
 }
 
 const openExecutionByID = async (executionId?: number) => {
@@ -379,14 +523,56 @@ const openExecutionByID = async (executionId?: number) => {
 }
 
 const saveCredential = async () => {
-  await api.saveCredential(credentialForm)
+  const payload: Partial<Credential> = { ...credentialForm }
+  if (payload.id && !credentialSecretDirty.value) {
+    payload.secret = credentialSecretOriginal.value
+  }
+  await api.saveCredential(payload)
   ElMessage.success('凭证已保存')
   resetCredentialForm()
+  credentialDialogVisible.value = false
   await loadCredentials()
 }
 
 const editCredential = (credential: Credential) => {
-  Object.assign(credentialForm, { ...credential, secret: '' })
+  credentialSecretMasked.value = credential.secretMasked || ''
+  credentialSecretOriginal.value = credential.secret || ''
+  credentialSecretDirty.value = false
+  Object.assign(credentialForm, { ...credential, secret: credential.secretMasked || '' })
+  credentialDialogVisible.value = true
+}
+
+const openExecutionLive = async (task: SyncTask, execution: SyncExecution) => {
+  selectedExecution.value = {
+    execution,
+    task,
+    nodes: [],
+  }
+  expandedNodeIds.value = new Set()
+  errorOnly.value = false
+  selectedNodeId.value = null
+  executionDetailVisible.value = true
+  executionDetailLoading.value = false
+  await nextTick()
+  ensureExecutionStreaming()
+  void refreshSelectedExecution()
+}
+
+const prepareCredentialSecretEdit = () => {
+  if (!credentialForm.id || credentialSecretDirty.value) {
+    return
+  }
+  credentialSecretDirty.value = true
+  credentialForm.secret = ''
+}
+
+const onCredentialSecretInput = () => {
+  if (credentialForm.id && !credentialSecretDirty.value) {
+    credentialSecretDirty.value = true
+    if (credentialForm.secret === credentialSecretMasked.value) {
+      credentialForm.secret = ''
+    }
+  }
 }
 
 const removeCredential = async (credential: Credential) => {
@@ -396,13 +582,16 @@ const removeCredential = async (credential: Credential) => {
 }
 
 const openExecution = async (execution: SyncExecution) => {
+  executionDetailLoading.value = true
   selectedExecution.value = await api.executionDetail(execution.id)
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
   errorOnly.value = false
   selectedNodeId.value = selectedExecution.value.nodes[0]?.id ?? null
+  executionDetailVisible.value = true
   await nextTick()
   syncTreeExpansion()
   ensureExecutionStreaming()
+  executionDetailLoading.value = false
 }
 
 const cleanupCache = async (cache: RepoCache) => {
@@ -420,6 +609,15 @@ const replayWebhookEvent = async (event: WebhookEvent) => {
   await loadWebhookEvents(executionTaskId.value)
   await loadExecutions(executionTaskId.value)
   await openExecution(execution)
+}
+
+const closeExecutionDetail = () => {
+  executionDetailVisible.value = false
+  executionDetailLoading.value = false
+  selectedExecution.value = null
+  selectedNodeId.value = null
+  expandedNodeIds.value = new Set()
+  stopExecutionStreaming()
 }
 
 const exportWebhookEvents = () => {
@@ -452,15 +650,29 @@ const exportWebhookEvents = () => {
   URL.revokeObjectURL(url)
 }
 
-const taskTriggerSummary = (task: SyncTask) => {
-  const bits: string[] = []
+const taskTriggerModes = (task: SyncTask) => {
+  const modes = ['手动']
   if (task.triggerConfig.enableSchedule) {
-    bits.push(`Schedule: ${task.triggerConfig.cron || 'unset'}`)
+    modes.push('定时')
   }
   if (task.triggerConfig.enableWebhook) {
-    bits.push(`Webhook: ${task.triggerConfig.webhookSecret ? 'signed' : 'unsigned'}`)
+    modes.push('Webhook')
   }
-  return bits.length ? bits.join(' | ') : 'Manual only'
+  return modes.join(' / ')
+}
+
+const taskScheduleSummary = (task: SyncTask) => {
+  if (!task.triggerConfig.enableSchedule) {
+    return '已关闭'
+  }
+  return task.triggerConfig.cron || '已启用'
+}
+
+const taskWebhookSummary = (task: SyncTask) => {
+  if (!task.triggerConfig.enableWebhook) {
+    return '已关闭'
+  }
+  return task.triggerConfig.webhookSecret ? '已启用（已签名）' : '已启用（未签名）'
 }
 
 const taskScheduleState = (task: SyncTask) => {
@@ -572,10 +784,6 @@ onBeforeUnmount(() => {
       <div>
         <p class="eyebrow">RepoSync</p>
         <h1>Git 镜像同步控制台</h1>
-        <p class="hero-copy">
-          当前版本已经覆盖任务管理、真实 mirror 执行、自动建仓、递归子模块同步、定时调度和 Webhook 鉴权。
-          这一版页面重点把调度状态和递归执行树展示出来，方便判断同步链路是否健康。
-        </p>
       </div>
       <div class="stats-grid">
         <div class="stat-card">
@@ -600,185 +808,75 @@ onBeforeUnmount(() => {
     <el-tabs class="workspace-tabs">
       <el-tab-pane label="任务">
         <div class="stack-layout">
-          <div class="content-grid">
-            <el-card shadow="never" class="panel-card">
-            <template #header>
-              <div class="panel-header">
-                <span>任务表单</span>
-                <el-button text @click="resetTaskForm">清空</el-button>
-              </div>
-            </template>
-            <el-form label-position="top">
-              <el-form-item label="任务名称">
-                <el-input v-model="taskForm.name" />
-              </el-form-item>
-              <el-form-item label="源仓库 URL">
-                <el-input v-model="taskForm.sourceRepoUrl" placeholder="git@github.com:org/repo.git" />
-              </el-form-item>
-              <el-form-item label="目标仓库 URL">
-                <el-input v-model="taskForm.targetRepoUrl" placeholder="git@gogs.example.com:mirror/repo.git" />
-              </el-form-item>
-              <el-form-item label="缓存保存路径">
-                <el-input v-model="taskForm.cacheBasePath" placeholder="留空则使用默认缓存目录；相对路径将拼接到默认目录下" />
-              </el-form-item>
-              <div class="two-column">
-                <el-form-item label="源凭证">
-                  <el-select v-model="taskForm.sourceCredentialId" clearable>
-                    <el-option v-for="item in credentials" :key="item.id" :label="item.name" :value="item.id" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="目标凭证">
-                  <el-select v-model="taskForm.targetCredentialId" clearable>
-                    <el-option v-for="item in credentials" :key="item.id" :label="item.name" :value="item.id" />
-                  </el-select>
-                </el-form-item>
-              </div>
-              <div class="two-column">
-                <el-form-item label="子模块源凭证">
-                  <el-select v-model="taskForm.submoduleSourceCredentialId" clearable>
-                    <el-option v-for="item in credentials" :key="`sub-src-${item.id}`" :label="item.name" :value="item.id" />
-                  </el-select>
-                  <div class="field-help">留空时回退到“源凭证”，用于子模块递归拉取。</div>
-                </el-form-item>
-                <el-form-item label="子模块目标凭证">
-                  <el-select v-model="taskForm.submoduleTargetCredentialId" clearable>
-                    <el-option v-for="item in credentials" :key="`sub-dst-${item.id}`" :label="item.name" :value="item.id" />
-                  </el-select>
-                  <div class="field-help">留空时回退到“目标凭证”，用于子模块镜像推送。</div>
-                </el-form-item>
-              </div>
-              <el-form-item label="目标平台 API 凭证">
-                <el-select v-model="taskForm.targetApiCredentialId" clearable>
-                  <el-option v-for="item in credentials" :key="`api-${item.id}`" :label="item.name" :value="item.id" />
-                </el-select>
-                <div class="field-help">留空时默认回退到“目标凭证”，用于兼容旧任务配置。</div>
-              </el-form-item>
-              <el-form-item label="子模块目标平台 API 凭证">
-                <el-select v-model="taskForm.submoduleTargetApiCredentialId" clearable>
-                  <el-option v-for="item in credentials" :key="`sub-api-${item.id}`" :label="item.name" :value="item.id" />
-                </el-select>
-                <div class="field-help">留空时回退到“目标平台 API 凭证”，用于子模块自动建仓。</div>
-              </el-form-item>
-              <div class="two-column">
-                <el-form-item label="目标平台">
-                  <el-select v-model="taskForm.providerConfig!.provider">
-                    <el-option label="GitHub" value="github" />
-                    <el-option label="Gogs" value="gogs" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="命名空间">
-                  <el-input v-model="taskForm.providerConfig!.namespace" />
-                </el-form-item>
-              </div>
-              <div class="two-column">
-                <el-form-item label="可见性">
-                  <el-select v-model="taskForm.providerConfig!.visibility">
-                    <el-option label="Private" value="private" />
-                    <el-option label="Public" value="public" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="API Base URL">
-                  <el-input v-model="taskForm.providerConfig!.baseApiUrl" placeholder="Optional" />
-                </el-form-item>
-              </div>
-              <el-form-item label="描述模板">
-                <el-input v-model="taskForm.providerConfig!.descriptionTemplate" />
-              </el-form-item>
-              <div class="two-column">
-                <el-form-item label="Cron">
-                  <el-input v-model="taskForm.triggerConfig!.cron" />
-                </el-form-item>
-                <el-form-item label="Branch Reference">
-                  <el-input v-model="taskForm.triggerConfig!.branchReference" />
-                </el-form-item>
-              </div>
-              <el-form-item label="Webhook Secret">
-                <el-input v-model="taskForm.triggerConfig!.webhookSecret" />
-              </el-form-item>
-              <div class="flag-row">
-                <el-switch v-model="taskForm.enabled" active-text="启用任务" />
-                <el-switch v-model="taskForm.recursiveSubmodules" active-text="递归子模块" />
-                <el-switch v-model="taskForm.syncAllRefs" active-text="镜像全部 refs" />
-                <el-switch v-model="taskForm.triggerConfig!.enableSchedule" active-text="启用定时" />
-                <el-switch v-model="taskForm.triggerConfig!.enableWebhook" active-text="启用 Webhook" />
-              </div>
-              <div class="task-trigger-preview">
+          <div class="full-width-layout">
+            <el-card shadow="never" class="panel-card panel-card-wide">
+              <template #header>
                 <div class="panel-header">
-                  <strong>触发配置预览</strong>
-                  <span class="muted-text mono">{{ taskFormWebhookPreview }}</span>
-                </div>
-                <div class="trigger-grid">
-                  <div v-for="item in taskFormTriggerCards" :key="item.label" class="trigger-card">
-                    <span>{{ item.label }}</span>
-                    <strong class="mono">{{ item.value }}</strong>
-                  </div>
-                </div>
-                <p class="preview-copy">
-                  Webhook 当前只处理 push 事件；如果配置了 Branch Reference，则仅接受匹配该 ref 的请求。
-                </p>
-                <p v-if="taskForm.recursiveSubmodules" class="preview-copy">
-                  递归子模块模式会把目标分支改写为可直接使用的派生提交：分支 HEAD 可能不同于源分支，但标签和其他 refs 仍保持 mirror 语义。
-                </p>
-              </div>
-              <el-button type="primary" @click="saveTask">保存任务</el-button>
-            </el-form>
-            </el-card>
-
-            <el-card shadow="never" class="panel-card">
-            <template #header>
-              <div class="panel-header">
-                <span>任务列表</span>
-                <el-button text :loading="loading" @click="refreshAll">刷新</el-button>
-              </div>
-            </template>
-            <el-table :data="tasks" height="620">
-              <el-table-column prop="name" label="任务" min-width="180" />
-              <el-table-column label="同步" width="120">
-                <template #default="{ row }">
-                  <el-tag :type="row.recursiveSubmodules ? 'success' : 'info'">
-                    {{ row.recursiveSubmodules ? '递归' : '单仓库' }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="调度 / Webhook" min-width="220">
-                <template #default="{ row }">
-                  <div class="trigger-stack">
-                    <span class="mono muted-text">{{ taskTriggerSummary(row) }}</span>
-                    <div class="trigger-tags">
-                      <el-tag size="small" effect="plain">{{ taskScheduleState(row) }}</el-tag>
-                      <el-tag size="small" effect="plain">{{ taskWebhookState(row) }}</el-tag>
-                      <el-tag size="small" effect="plain">ref {{ taskBranchState(row) }}</el-tag>
-                    </div>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="最近执行" width="130">
-                <template #default="{ row }">
-                  <el-tag :type="taskStatusType(row.lastExecutionStatus)">
-                    {{ row.lastExecutionStatus || 'none' }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="仓库 / 建仓" width="120">
-                <template #default="{ row }">
-                  {{ row.lastExecutionRepoCount || 0 }} / {{ row.lastCreatedRepoCount || 0 }}
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="260">
-                <template #default="{ row }">
+                  <span>任务列表</span>
                   <div class="action-row">
-                    <el-button size="small" @click="editTask(row)">编辑</el-button>
-                    <el-button size="small" type="primary" @click="runTask(row)">执行</el-button>
-                    <el-button size="small" @click="openTaskHistory(row.id)">历史</el-button>
-                    <el-button size="small" type="danger" @click="removeTask(row)">删除</el-button>
+                    <el-button type="primary" @click="openCreateTask">新增任务</el-button>
+                    <el-button text :loading="loading" @click="refreshAll">刷新</el-button>
                   </div>
-                </template>
-              </el-table-column>
-            </el-table>
+                </div>
+              </template>
+              <el-table :data="tasks" height="620">
+                <el-table-column prop="name" label="任务" min-width="220" />
+                <el-table-column label="同步" width="130">
+                  <template #default="{ row }">
+                    <el-tag :type="row.recursiveSubmodules ? 'success' : 'info'">
+                      {{ row.recursiveSubmodules ? '递归子模块' : '单仓库' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="触发配置" min-width="340">
+                  <template #default="{ row }">
+                    <div class="task-trigger-cell">
+                      <div class="task-trigger-line">
+                        <span class="task-trigger-label">触发方式</span>
+                        <strong>{{ taskTriggerModes(row) }}</strong>
+                      </div>
+                      <div class="task-trigger-line">
+                        <span class="task-trigger-label">定时</span>
+                        <span class="mono">{{ taskScheduleSummary(row) }}</span>
+                      </div>
+                      <div class="task-trigger-line">
+                        <span class="task-trigger-label">Webhook</span>
+                        <span>{{ taskWebhookSummary(row) }}</span>
+                      </div>
+                      <div class="task-trigger-line">
+                        <span class="task-trigger-label">分支</span>
+                        <span class="mono">{{ taskBranchState(row) }}</span>
+                      </div>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="最近执行" width="130">
+                  <template #default="{ row }">
+                    <el-tag :type="taskStatusType(row.lastExecutionStatus)">
+                      {{ row.lastExecutionStatus || '未执行' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="仓库 / 建仓" width="120">
+                  <template #default="{ row }">
+                    {{ row.lastExecutionRepoCount || 0 }} / {{ row.lastCreatedRepoCount || 0 }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="操作" width="280" align="center">
+                  <template #default="{ row }">
+                    <div class="action-row action-row-inline">
+                      <el-button size="small" @click="editTask(row)">编辑</el-button>
+                      <el-button size="small" type="primary" @click="runTask(row)">执行</el-button>
+                      <el-button size="small" @click="openTaskHistory(row.id)">历史</el-button>
+                      <el-button size="small" type="danger" @click="removeTask(row)">删除</el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
             </el-card>
           </div>
 
-          <el-card shadow="never" class="panel-card">
+          <el-card shadow="never" class="panel-card panel-card-wide">
             <template #header>
               <div class="panel-header">
                 <span>调度状态</span>
@@ -814,43 +912,13 @@ onBeforeUnmount(() => {
       </el-tab-pane>
 
       <el-tab-pane label="凭证">
-        <div class="content-grid">
-          <el-card shadow="never" class="panel-card">
+        <div class="full-width-layout">
+          <el-card shadow="never" class="panel-card panel-card-wide">
             <template #header>
               <div class="panel-header">
-                <span>凭证表单</span>
-                <el-button text @click="resetCredentialForm">清空</el-button>
+                <span>凭证列表</span>
+                <el-button type="primary" @click="openCreateCredential">新增凭证</el-button>
               </div>
-            </template>
-            <el-form label-position="top">
-              <el-form-item label="名称">
-                <el-input v-model="credentialForm.name" />
-              </el-form-item>
-              <div class="two-column">
-                <el-form-item label="类型">
-                  <el-select v-model="credentialForm.type">
-                    <el-option label="API Token" value="api_token" />
-                    <el-option label="HTTPS Token" value="https_token" />
-                    <el-option label="SSH Key" value="ssh_key" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="用户名">
-                  <el-input v-model="credentialForm.username" />
-                </el-form-item>
-              </div>
-              <el-form-item label="Secret">
-                <el-input v-model="credentialForm.secret" type="textarea" :rows="4" />
-              </el-form-item>
-              <el-form-item label="Scope">
-                <el-input v-model="credentialForm.scope" />
-              </el-form-item>
-              <el-button type="primary" @click="saveCredential">保存凭证</el-button>
-            </el-form>
-          </el-card>
-
-          <el-card shadow="never" class="panel-card">
-            <template #header>
-              <span>凭证列表</span>
             </template>
             <el-table :data="credentials" height="620">
               <el-table-column prop="name" label="名称" min-width="180" />
@@ -868,7 +936,8 @@ onBeforeUnmount(() => {
             </el-table>
           </el-card>
         </div>
-      </el-tab-pane>
+
+            </el-tab-pane>
 
       <el-tab-pane label="缓存">
         <el-card shadow="never" class="panel-card">
@@ -891,248 +960,468 @@ onBeforeUnmount(() => {
           </el-table>
         </el-card>
       </el-tab-pane>
+    </el-tabs>
 
-      <el-tab-pane label="执行记录">
-        <div class="content-grid">
-          <el-card shadow="never" class="panel-card">
-            <template #header>
-              <div class="panel-header">
-                <span>执行历史</span>
-                <span class="muted-text">
-                  {{ executionTaskId ? `任务 #${executionTaskId}` : '先从任务页选择一个任务' }}
-                </span>
-              </div>
+
+    <el-dialog v-model="executionHistoryVisible" :title="executionHistoryTitle" width="1240px" destroy-on-close>
+      <div class="history-dialog-body">
+        <div class="panel-header">
+          <span>执行历史</span>
+          <span class="muted-text">
+            {{ executionTaskId ? `任务 #${executionTaskId}` : '请先从任务列表进入' }}
+          </span>
+        </div>
+        <el-table :data="executions" max-height="420">
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="taskStatusType(row.status)">{{ row.status }}</el-tag>
             </template>
-            <el-table :data="executions" height="620">
-              <el-table-column label="状态" width="100">
-                <template #default="{ row }">
-                  <el-tag :type="taskStatusType(row.status)">{{ row.status }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="triggerType" label="触发方式" width="110" />
-              <el-table-column prop="repoCount" label="仓库数" width="90" />
-              <el-table-column prop="createdRepoCount" label="建仓数" width="90" />
-              <el-table-column prop="failedNodeCount" label="失败节点" width="100" />
-              <el-table-column prop="startedAt" label="开始时间" min-width="180" />
-              <el-table-column label="操作" width="120">
-                <template #default="{ row }">
-                  <el-button size="small" @click="openExecution(row)">详情</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
+          </el-table-column>
+          <el-table-column prop="triggerType" label="触发方式" width="110" />
+          <el-table-column prop="repoCount" label="仓库数" width="90" />
+          <el-table-column prop="createdRepoCount" label="建仓数" width="90" />
+          <el-table-column prop="failedNodeCount" label="失败节点" width="100" />
+          <el-table-column prop="startedAt" label="开始时间" min-width="180" />
+          <el-table-column label="操作" width="120">
+            <template #default="{ row }">
+              <el-button size="small" @click="openExecution(row)">详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
 
-            <div class="webhook-history">
-              <div class="panel-header">
-                <strong>最近 Webhook 记录</strong>
-                <div class="history-toolbar">
-                  <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先选择任务' }}</span>
-                  <el-button size="small" @click="exportWebhookEvents">导出 CSV</el-button>
-                  <el-select v-model="webhookStatusFilter" size="small" class="history-filter">
-                    <el-option label="全部" value="all" />
-                    <el-option label="Accepted" value="accepted" />
-                    <el-option label="Ignored" value="ignored" />
-                    <el-option label="Rejected" value="rejected" />
-                    <el-option label="Failed" value="failed" />
-                    <el-option label="Blocked" value="blocked" />
-                  </el-select>
-                </div>
-              </div>
-              <div class="webhook-status-grid">
-                <div
-                  v-for="item in webhookStatusCards"
-                  :key="item.label"
-                  class="webhook-status-card"
-                  :data-status="item.status"
-                >
-                  <span>{{ item.label }}</span>
-                  <strong>{{ item.value }}</strong>
-                </div>
-              </div>
-              <div v-if="latestIgnoredWebhook" class="webhook-reason-banner">
-                <div class="panel-header">
-                  <strong>最近一次忽略原因</strong>
-                  <el-tag size="small" type="warning">{{ latestIgnoredWebhook.eventType || 'push' }}</el-tag>
-                </div>
-                <p>{{ webhookReasonLabel(latestIgnoredWebhook.reason) }}</p>
-                <span class="muted-text mono">
-                  {{ latestIgnoredWebhook.ref || 'no ref' }} · {{ latestIgnoredWebhook.createdAt }}
-                </span>
-              </div>
-              <el-table :data="filteredWebhookEvents" height="260" empty-text="暂无 Webhook 记录">
-                <el-table-column prop="status" label="状态" width="100">
-                  <template #default="{ row }">
-                    <el-tag size="small" :type="webhookEventStatusType(row.status)">
-                      {{ row.status }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="eventType" label="事件" width="90" />
-                <el-table-column prop="ref" label="Ref" min-width="180" />
-                <el-table-column prop="createdAt" label="时间" width="180" />
-                <el-table-column label="结果" min-width="260">
-                  <template #default="{ row }">
-                    <span :class="{ 'warning-text': row.status === 'ignored' }">{{ webhookReasonLabel(row.reason) }}</span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="操作" width="160">
-                  <template #default="{ row }">
-                    <div class="action-row">
-                      <el-button v-if="row.executionId" size="small" @click="openExecutionByID(row.executionId)">跳转</el-button>
-                      <el-button size="small" type="primary" plain @click="replayWebhookEvent(row)">重放</el-button>
-                    </div>
-                  </template>
-                </el-table-column>
-              </el-table>
+        <div class="webhook-history">
+          <div class="panel-header">
+            <strong>最近 Webhook 记录</strong>
+            <div class="history-toolbar">
+              <span class="muted-text">{{ executionTaskId ? `任务 #${executionTaskId}` : '先选择任务' }}</span>
+              <el-button size="small" @click="exportWebhookEvents">导出 CSV</el-button>
+              <el-select v-model="webhookStatusFilter" size="small" class="history-filter">
+                <el-option label="全部" value="all" />
+                <el-option label="已接受" value="accepted" />
+                <el-option label="已忽略" value="ignored" />
+                <el-option label="已拒绝" value="rejected" />
+                <el-option label="失败" value="failed" />
+                <el-option label="已阻止" value="blocked" />
+              </el-select>
             </div>
-          </el-card>
+          </div>
+          <div class="webhook-status-grid">
+            <div
+              v-for="item in webhookStatusCards"
+              :key="item.label"
+              class="webhook-status-card"
+              :data-status="item.status"
+            >
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+            </div>
+          </div>
+          <div v-if="latestIgnoredWebhook" class="webhook-reason-banner">
+            <div class="panel-header">
+              <strong>最近一次忽略原因</strong>
+              <el-tag size="small" type="warning">{{ latestIgnoredWebhook.eventType || 'push' }}</el-tag>
+            </div>
+            <p>{{ webhookReasonLabel(latestIgnoredWebhook.reason) }}</p>
+            <span class="muted-text mono">
+              {{ latestIgnoredWebhook.ref || '无 ref' }} · {{ latestIgnoredWebhook.createdAt }}
+            </span>
+          </div>
+          <el-table :data="filteredWebhookEvents" max-height="280" empty-text="暂无 Webhook 记录">
+            <el-table-column prop="status" label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="webhookEventStatusType(row.status)">
+                  {{ row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="eventType" label="事件" width="90" />
+            <el-table-column prop="ref" label="Ref" min-width="180" />
+            <el-table-column prop="createdAt" label="时间" width="180" />
+            <el-table-column label="结果" min-width="260">
+              <template #default="{ row }">
+                <span :class="{ 'warning-text': row.status === 'ignored' }">{{ webhookReasonLabel(row.reason) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="160">
+              <template #default="{ row }">
+                <div class="action-row">
+                  <el-button v-if="row.executionId" size="small" @click="openExecutionByID(row.executionId)">跳转</el-button>
+                  <el-button size="small" type="primary" plain @click="replayWebhookEvent(row)">重放</el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+    </el-dialog>
 
-          <el-card shadow="never" class="panel-card">
-            <template #header>
-              <span>执行详情</span>
-            </template>
-            <div v-if="selectedExecution" class="detail-stack">
-              <div class="detail-block">
-                <strong>{{ selectedExecution.task.name }}</strong>
-                <p>
-                  {{ selectedExecution.execution.status === 'running' ? '执行中，日志每 2 秒自动刷新。' : '执行结束，以下为本次摘要日志。' }}
-                </p>
-                <p v-if="selectedExecution.task.recursiveSubmodules">
-                  当前任务启用了递归子模块，目标分支会保存可直接使用的派生提交；如果需要严格分支 SHA 对齐，请不要把它当成逐字节 branch mirror。
-                </p>
-                <div class="summary-tags">
-                  <el-tag size="small">trigger: {{ selectedExecution.execution.triggerType }}</el-tag>
-                  <el-tag size="small">repos: {{ selectedExecution.execution.repoCount }}</el-tag>
-                  <el-tag size="small">created: {{ selectedExecution.execution.createdRepoCount }}</el-tag>
-                </div>
-              </div>
+    <el-dialog
+      v-model="executionDetailVisible"
+      title="执行详情"
+      width="1280px"
+      destroy-on-close
+      @closed="closeExecutionDetail"
+    >
+      <div v-if="executionDetailLoading" class="execution-loading-state">
+        <el-skeleton :rows="8" animated />
+        <p class="muted-text">正在启动任务并加载执行详情...</p>
+      </div>
+      <div v-if="selectedExecution" class="detail-stack">
+        <div class="detail-block">
+          <strong>{{ selectedExecution.task.name }}</strong>
+          <p>
+            {{ selectedExecution.execution.status === 'running' ? '执行中，日志会持续自动刷新。' : '执行结束，以下为本次摘要日志。' }}
+          </p>
+          <p v-if="selectedExecution.task.recursiveSubmodules">
+            当前任务启用了递归子模块，目标分支会保存可直接使用的派生提交；如果需要严格分支 SHA 对齐，请不要把它当成逐字节 branch mirror。
+          </p>
+          <div class="summary-tags">
+            <el-tag size="small">触发: {{ selectedExecution.execution.triggerType }}</el-tag>
+            <el-tag size="small">仓库: {{ selectedExecution.execution.repoCount }}</el-tag>
+            <el-tag size="small">建仓: {{ selectedExecution.execution.createdRepoCount }}</el-tag>
+          </div>
+        </div>
 
-              <div class="detail-block log-panel">
-                <div class="panel-header">
-                  <strong>执行日志</strong>
-                  <el-tag size="small" :type="taskStatusType(selectedExecution.execution.status)">
-                    {{ selectedExecution.execution.status }}
-                  </el-tag>
-                </div>
-                <pre class="log-output">{{ selectedExecution.execution.summaryLog || '等待日志输出...' }}</pre>
-              </div>
+        <div class="detail-block log-panel">
+          <div class="panel-header">
+            <strong>执行日志</strong>
+            <el-tag size="small" :type="taskStatusType(selectedExecution.execution.status)">
+              {{ selectedExecution.execution.status }}
+            </el-tag>
+          </div>
+          <pre class="log-output">{{ selectedExecution.execution.summaryLog || '等待日志输出...' }}</pre>
+        </div>
 
-              <div class="status-grid">
-                <div v-for="item in selectedExecutionStats" :key="item.label" class="status-card">
-                  <span>{{ item.label }}</span>
-                  <strong>{{ item.value }}</strong>
-                </div>
-              </div>
+        <div class="status-grid">
+          <div v-for="item in selectedExecutionStats" :key="item.label" class="status-card">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
+        </div>
 
-              <div class="detail-block trigger-panel">
-                <div class="panel-header">
-                  <strong>触发状态面板</strong>
-                  <div class="action-row">
-                    <el-button size="small" @click="expandAllNodes">展开全部</el-button>
-                    <el-button size="small" @click="collapseAllNodes">收起全部</el-button>
-                    <el-switch v-model="errorOnly" active-text="只看失败节点" />
-                  </div>
-                </div>
-                <div class="trigger-grid">
-                  <div class="trigger-card">
-                    <span>Schedule</span>
-                    <strong>{{ taskScheduleState(selectedExecution.task) }}</strong>
-                  </div>
-                  <div class="trigger-card">
-                    <span>Webhook</span>
-                    <strong>{{ taskWebhookState(selectedExecution.task) }}</strong>
-                  </div>
-                  <div class="trigger-card">
-                    <span>Branch Filter</span>
-                    <strong class="mono">{{ taskBranchState(selectedExecution.task) }}</strong>
-                  </div>
-                  <div class="trigger-card">
-                    <span>Mirror Scope</span>
-                    <strong>{{ selectedExecution.task.syncAllRefs ? 'all refs' : 'custom' }}</strong>
-                  </div>
-                </div>
-              </div>
+        <div class="detail-block trigger-panel">
+          <div class="panel-header">
+            <strong>触发状态面板</strong>
+            <div class="action-row">
+              <el-button size="small" @click="expandAllNodes">展开全部</el-button>
+              <el-button size="small" @click="collapseAllNodes">收起全部</el-button>
+              <el-switch v-model="errorOnly" active-text="只看失败节点" />
+            </div>
+          </div>
+          <div class="trigger-grid">
+            <div class="trigger-card">
+              <span>定时计划</span>
+              <strong>{{ taskScheduleState(selectedExecution.task) }}</strong>
+            </div>
+            <div class="trigger-card">
+              <span>Webhook</span>
+              <strong>{{ taskWebhookState(selectedExecution.task) }}</strong>
+            </div>
+            <div class="trigger-card">
+              <span>分支过滤</span>
+              <strong class="mono">{{ taskBranchState(selectedExecution.task) }}</strong>
+            </div>
+            <div class="trigger-card">
+              <span>镜像范围</span>
+              <strong>{{ selectedExecution.task.syncAllRefs ? '全部 refs' : '自定义' }}</strong>
+            </div>
+          </div>
+        </div>
 
-              <div class="execution-layout">
-                <div class="tree-panel">
-                  <el-tree
-                    ref="executionTreeRef"
-                    :data="executionTreeData"
-                    node-key="id"
-                    :current-node-key="selectedNodeId ?? undefined"
-                    :expand-on-click-node="false"
-                    highlight-current
-                    empty-text="暂无执行节点"
-                    @node-click="onTreeNodeClick"
-                    @node-expand="onTreeNodeExpand"
-                    @node-collapse="onTreeNodeCollapse"
-                  >
-                    <template #default="{ data }">
-                      <div class="tree-node-card" :class="{ 'tree-node-card-active': selectedNodeId === data.id }">
-                        <div class="tree-title">
-                          <span class="mono">{{ data.label }}</span>
-                          <el-tag size="small" :type="taskStatusType(data.status)">{{ data.status }}</el-tag>
-                        </div>
-                        <div class="tree-meta">
-                          <span>depth {{ data.depth }}</span>
-                          <span>cache {{ data.cacheHit ? 'hit' : 'miss' }}</span>
-                          <span>auto-create {{ data.autoCreated ? 'yes' : 'no' }}</span>
-                          <span>create {{ data.createDurationMs }}ms</span>
-                          <span>fetch {{ data.fetchDurationMs }}ms</span>
-                          <span>push {{ data.pushDurationMs }}ms</span>
-                        </div>
-                        <div class="tree-paths mono">
-                          <div>src: {{ data.sourceRepoUrl }}</div>
-                          <div>dst: {{ data.targetRepoUrl }}</div>
-                          <div v-if="data.referenceCommit">ref: {{ data.referenceCommit }}</div>
-                          <div v-if="data.errorMessage" class="error-text">error: {{ data.errorMessage }}</div>
-                        </div>
-                      </div>
-                    </template>
-                  </el-tree>
-                </div>
-                <div v-if="selectedExecutionNode" class="node-detail-card">
-                  <div class="panel-header">
-                    <strong>节点详情</strong>
-                    <el-tag size="small" :type="taskStatusType(selectedExecutionNode.status)">
-                      {{ selectedExecutionNode.status }}
-                    </el-tag>
+        <div class="execution-layout">
+          <div class="tree-panel">
+            <el-tree
+              ref="executionTreeRef"
+              :data="executionTreeData"
+              node-key="id"
+              :current-node-key="selectedNodeId ?? undefined"
+              :expand-on-click-node="false"
+              highlight-current
+              empty-text="暂无执行节点"
+              @node-click="onTreeNodeClick"
+              @node-expand="onTreeNodeExpand"
+              @node-collapse="onTreeNodeCollapse"
+            >
+              <template #default="{ data }">
+                <div class="tree-node-card" :class="{ 'tree-node-card-active': selectedNodeId === data.id }">
+                  <div class="tree-title">
+                    <span class="mono">{{ data.label }}</span>
+                    <el-tag size="small" :type="taskStatusType(data.status)">{{ data.status }}</el-tag>
                   </div>
-                  <div class="node-detail-grid">
-                    <div class="node-detail-item">
-                      <span>路径</span>
-                      <strong class="mono">{{ selectedExecutionNode.repoPath || '(root)' }}</strong>
-                    </div>
-                    <div class="node-detail-item">
-                      <span>深度</span>
-                      <strong>{{ selectedExecutionNode.depth }}</strong>
-                    </div>
-                    <div class="node-detail-item">
-                      <span>缓存</span>
-                      <strong>{{ selectedExecutionNode.cacheHit ? 'hit' : 'miss' }}</strong>
-                    </div>
-                    <div class="node-detail-item">
-                      <span>自动建仓</span>
-                      <strong>{{ selectedExecutionNode.autoCreated ? 'yes' : 'no' }}</strong>
-                    </div>
+                  <div class="tree-meta">
+                    <span>深度 {{ data.depth }}</span>
+                    <span>缓存 {{ data.cacheHit ? '命中' : '未命中' }}</span>
+                    <span>建仓 {{ data.autoCreated ? '已创建' : '未创建' }}</span>
+                    <span>创建 {{ data.createDurationMs }}ms</span>
+                    <span>拉取 {{ data.fetchDurationMs }}ms</span>
+                    <span>推送 {{ data.pushDurationMs }}ms</span>
                   </div>
                   <div class="tree-paths mono">
-                    <div>src: {{ selectedExecutionNode.sourceRepoUrl }}</div>
-                    <div>dst: {{ selectedExecutionNode.targetRepoUrl }}</div>
-                    <div v-if="selectedExecutionNode.referenceCommit">ref: {{ selectedExecutionNode.referenceCommit }}</div>
-                    <div>create: {{ selectedExecutionNode.createDurationMs }}ms</div>
-                    <div>fetch: {{ selectedExecutionNode.fetchDurationMs }}ms</div>
-                    <div>push: {{ selectedExecutionNode.pushDurationMs }}ms</div>
-                    <div v-if="selectedExecutionNode.errorMessage" class="error-text">
-                      error: {{ selectedExecutionNode.errorMessage }}
-                    </div>
+                    <div>源: {{ data.sourceRepoUrl }}</div>
+                    <div>目标: {{ data.targetRepoUrl }}</div>
+                    <div v-if="data.referenceCommit">引用: {{ data.referenceCommit }}</div>
+                    <div v-if="data.errorMessage" class="error-text">错误: {{ data.errorMessage }}</div>
                   </div>
+                </div>
+              </template>
+            </el-tree>
+          </div>
+          <div v-if="selectedExecutionNode" class="node-detail-card">
+            <div class="panel-header">
+              <strong>节点详情</strong>
+              <el-tag size="small" :type="taskStatusType(selectedExecutionNode.status)">
+                {{ selectedExecutionNode.status }}
+              </el-tag>
+            </div>
+            <div class="node-detail-grid">
+              <div class="node-detail-item">
+                <span>路径</span>
+                <strong class="mono">{{ selectedExecutionNode.repoPath || '(root)' }}</strong>
+              </div>
+              <div class="node-detail-item">
+                <span>深度</span>
+                <strong>{{ selectedExecutionNode.depth }}</strong>
+              </div>
+              <div class="node-detail-item">
+                <span>缓存</span>
+                <strong>{{ selectedExecutionNode.cacheHit ? '命中' : '未命中' }}</strong>
+              </div>
+              <div class="node-detail-item">
+                <span>自动建仓</span>
+                <strong>{{ selectedExecutionNode.autoCreated ? '是' : '否' }}</strong>
+              </div>
+            </div>
+            <div class="tree-paths mono">
+              <div>源: {{ selectedExecutionNode.sourceRepoUrl }}</div>
+              <div>目标: {{ selectedExecutionNode.targetRepoUrl }}</div>
+              <div v-if="selectedExecutionNode.referenceCommit">引用: {{ selectedExecutionNode.referenceCommit }}</div>
+              <div>创建: {{ selectedExecutionNode.createDurationMs }}ms</div>
+              <div>拉取: {{ selectedExecutionNode.fetchDurationMs }}ms</div>
+              <div>推送: {{ selectedExecutionNode.pushDurationMs }}ms</div>
+              <div v-if="selectedExecutionNode.errorMessage" class="error-text">
+                错误: {{ selectedExecutionNode.errorMessage }}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <el-empty v-else-if="!executionDetailLoading" description="暂无执行详情" />
+    </el-dialog>
+
+    <el-dialog v-model="taskDialogVisible" :title="taskDialogTitle" width="1080px" destroy-on-close>
+      <el-form ref="taskFormRef" :model="taskForm" :rules="taskFormRules" label-position="top" class="dialog-form">
+        <section class="form-section">
+          <div class="form-section-header">
+            <strong>基础信息</strong>
+            <span>定义任务名称、源目标仓库和缓存位置。</span>
+          </div>
+          <div class="form-section-body">
+            <el-form-item label="任务名称" prop="name">
+              <el-input v-model="taskForm.name" />
+            </el-form-item>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="源仓库 URL" prop="sourceRepoUrl">
+                <el-input v-model="taskForm.sourceRepoUrl" placeholder="git@github.com:org/repo.git" />
+              </el-form-item>
+              <el-form-item label="目标仓库 URL" prop="targetRepoUrl">
+                <el-input v-model="taskForm.targetRepoUrl" placeholder="git@gogs.example.com:mirror/repo.git" />
+              </el-form-item>
+            </div>
+            <el-form-item label="缓存保存路径">
+              <el-input v-model="taskForm.cacheBasePath" placeholder="留空时使用默认目录，也可以填写绝对或相对路径" />
+            </el-form-item>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-header">
+            <strong>凭证配置</strong>
+            <span>分别控制主仓库、子模块和平台 API 的访问凭证。</span>
+          </div>
+          <div class="form-section-body">
+            <div class="two-column form-grid-wide">
+              <el-form-item label="源凭证">
+                <el-select v-model="taskForm.sourceCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="item.id" :label="item.name" :value="item.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="目标凭证">
+                <el-select v-model="taskForm.targetCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="item.id" :label="item.name" :value="item.id" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="子模块源凭证">
+                <el-select v-model="taskForm.submoduleSourceCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="`sub-src-${item.id}`" :label="item.name" :value="item.id" />
+                </el-select>
+                <div class="field-help">留空时会回退使用主仓库的源凭证。</div>
+              </el-form-item>
+              <el-form-item label="子模块目标凭证">
+                <el-select v-model="taskForm.submoduleTargetCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="`sub-dst-${item.id}`" :label="item.name" :value="item.id" />
+                </el-select>
+                <div class="field-help">留空时会回退使用主仓库的目标凭证。</div>
+              </el-form-item>
+            </div>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="目标平台 API 凭证">
+                <el-select v-model="taskForm.targetApiCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="`api-${item.id}`" :label="item.name" :value="item.id" />
+                </el-select>
+                <div class="field-help">用于自动建仓、检查仓库存在性等平台 API 调用。</div>
+              </el-form-item>
+              <el-form-item label="子模块目标平台 API 凭证">
+                <el-select v-model="taskForm.submoduleTargetApiCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="`sub-api-${item.id}`" :label="item.name" :value="item.id" />
+                </el-select>
+                <div class="field-help">留空时会继承主仓库的目标平台 API 凭证。</div>
+              </el-form-item>
+            </div>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-header">
+            <strong>平台与建仓</strong>
+            <span>配置自动建仓时使用的平台、命名空间和仓库描述。</span>
+          </div>
+          <div class="form-section-body">
+            <div class="two-column form-grid-wide">
+              <el-form-item label="目标平台">
+                <el-select v-model="taskForm.providerConfig!.provider">
+                  <el-option label="GitHub" value="github" />
+                  <el-option label="Gogs" value="gogs" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="命名空间">
+                <el-input v-model="taskForm.providerConfig!.namespace" />
+              </el-form-item>
+            </div>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="可见性">
+                <el-select v-model="taskForm.providerConfig!.visibility">
+                  <el-option label="Private" value="private" />
+                  <el-option label="Public" value="public" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="API Base URL">
+                <el-input v-model="taskForm.providerConfig!.baseApiUrl" placeholder="Optional" />
+              </el-form-item>
+            </div>
+            <el-form-item label="描述模板">
+              <el-input v-model="taskForm.providerConfig!.descriptionTemplate" />
+            </el-form-item>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-header">
+            <strong>触发与同步策略</strong>
+            <span>设置定时、Webhook、分支过滤以及镜像行为。</span>
+          </div>
+          <div class="form-section-body">
+            <div class="flag-row">
+              <el-switch v-model="taskForm.enabled" active-text="启用任务" />
+              <el-switch v-model="taskForm.recursiveSubmodules" active-text="递归子模块" />
+              <el-switch v-model="taskForm.syncAllRefs" active-text="镜像全部 refs" />
+              <el-switch v-model="taskForm.triggerConfig!.enableSchedule" active-text="启用定时" />
+              <el-switch v-model="taskForm.triggerConfig!.enableWebhook" active-text="启用 Webhook" />
+            </div>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="Cron" prop="triggerConfig.cron">
+                <el-input v-model="taskForm.triggerConfig!.cron" />
+              </el-form-item>
+              <el-form-item label="Branch Reference">
+                <el-input v-model="taskForm.triggerConfig!.branchReference" />
+              </el-form-item>
+            </div>
+            <el-form-item label="Webhook Secret" prop="triggerConfig.webhookSecret">
+              <el-input v-model="taskForm.triggerConfig!.webhookSecret" />
+            </el-form-item>
+            <div class="task-trigger-preview">
+              <div class="panel-header">
+                <strong>触发配置预览</strong>
+                <span class="muted-text mono">{{ taskFormWebhookPreview }}</span>
+              </div>
+              <div class="trigger-grid">
+                <div v-for="item in taskFormTriggerCards" :key="item.label" class="trigger-card">
+                  <span>{{ item.label }}</span>
+                  <strong class="mono">{{ item.value }}</strong>
                 </div>
               </div>
             </div>
-            <el-empty v-else description="暂无执行详情" />
-          </el-card>
+          </div>
+        </section>
+      </el-form>
+      <template #footer>
+        <div class="action-row dialog-footer">
+          <el-button @click="taskDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="saveTask">保存任务</el-button>
         </div>
-      </el-tab-pane>
-    </el-tabs>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="credentialDialogVisible" :title="credentialDialogTitle" width="760px" destroy-on-close>
+      <el-form label-position="top" class="dialog-form">
+        <section class="form-section">
+          <div class="form-section-header">
+            <strong>基本信息</strong>
+            <span>定义凭证名称、类型和用途范围。</span>
+          </div>
+          <div class="form-section-body">
+            <el-form-item label="名称">
+              <el-input v-model="credentialForm.name" />
+            </el-form-item>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="类型">
+                <el-select v-model="credentialForm.type">
+                  <el-option label="API Token" value="api_token" />
+                  <el-option label="HTTPS Token" value="https_token" />
+                  <el-option label="SSH Key" value="ssh_key" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="用户名">
+                <el-input v-model="credentialForm.username" />
+              </el-form-item>
+            </div>
+            <el-form-item label="用途">
+              <el-input v-model="credentialForm.scope" />
+            </el-form-item>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-header">
+            <strong>密钥内容</strong>
+            <span>按当前凭证类型填写 Token 或 SSH 私钥内容。</span>
+          </div>
+          <div class="form-section-body">
+            <el-form-item label="Secret">
+              <el-input
+                v-model="credentialForm.secret"
+                type="textarea"
+                :rows="6"
+                @focus="prepareCredentialSecretEdit"
+                @input="onCredentialSecretInput"
+              />
+              <div v-if="credentialForm.id && !credentialSecretDirty" class="field-help">
+                当前显示的是脱敏值；如果不修改这个字段，保存时会保留原始密钥。
+              </div>
+              <div v-else-if="credentialForm.id" class="field-help">
+                已进入重新输入模式，请填写新的 Secret。
+              </div>
+            </el-form-item>
+          </div>
+        </section>
+      </el-form>
+      <template #footer>
+        <div class="action-row dialog-footer">
+          <el-button @click="credentialDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="saveCredential">保存凭证</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
