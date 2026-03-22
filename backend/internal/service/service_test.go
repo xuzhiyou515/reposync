@@ -34,6 +34,7 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	worktree := filepath.Join(root, "work")
 	dbPath := filepath.Join(root, "reposync.db")
 	cacheDir := filepath.Join(root, "cache")
+	customCacheDir := filepath.Join(root, "custom-cache")
 
 	runGit(t, "", "init", "--bare", sourceBare)
 	runGit(t, "", "init", "--bare", targetBare)
@@ -68,6 +69,7 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 		Name:                "mirror-all-refs",
 		SourceRepoURL:       sourceBare,
 		TargetRepoURL:       targetBare,
+		CacheBasePath:       customCacheDir,
 		Enabled:             true,
 		RecursiveSubmodules: false,
 		SyncAllRefs:         true,
@@ -106,6 +108,9 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	}
 	if caches[0].HitCount < 2 {
 		t.Fatalf("expected cache hit count >= 2, got %d", caches[0].HitCount)
+	}
+	if !strings.HasPrefix(caches[0].CachePath, customCacheDir) {
+		t.Fatalf("expected cache path under custom cache dir %s, got %s", customCacheDir, caches[0].CachePath)
 	}
 
 	detail, err := svc.ExecutionDetail(context.Background(), second.ID)

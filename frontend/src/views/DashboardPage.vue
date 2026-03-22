@@ -22,6 +22,7 @@ const emptyTask = (): Partial<SyncTask> => ({
   name: '',
   sourceRepoUrl: '',
   targetRepoUrl: '',
+  cacheBasePath: '',
   enabled: true,
   recursiveSubmodules: true,
   syncAllRefs: true,
@@ -454,6 +455,9 @@ onBeforeUnmount(() => {
               </el-form-item>
               <el-form-item label="目标仓库 URL">
                 <el-input v-model="taskForm.targetRepoUrl" placeholder="git@gogs.example.com:mirror/repo.git" />
+              </el-form-item>
+              <el-form-item label="缓存保存路径">
+                <el-input v-model="taskForm.cacheBasePath" placeholder="留空则使用默认缓存目录；相对路径将拼接到默认目录下" />
               </el-form-item>
               <div class="two-column">
                 <el-form-item label="源凭证">

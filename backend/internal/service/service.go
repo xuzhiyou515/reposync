@@ -104,6 +104,17 @@ func buildCacheKey(source, target string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func resolveCacheBase(defaultBase string, taskBase string) string {
+	base := strings.TrimSpace(taskBase)
+	if base == "" {
+		return defaultBase
+	}
+	if filepath.IsAbs(base) {
+		return filepath.Clean(base)
+	}
+	return filepath.Join(defaultBase, base)
+}
+
 type executionCounters struct {
 	repoCount        int
 	createdRepoCount int
@@ -224,8 +235,9 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 
 	now := time.Now().UTC()
 	cacheKey := buildCacheKey(sourceRepoURL, targetRepoURL)
-	cachePath := filepath.Join(s.cacheDir, cacheKey+".git")
-	_ = os.MkdirAll(s.cacheDir, 0o755)
+	cacheRoot := resolveCacheBase(s.cacheDir, task.CacheBasePath)
+	cachePath := filepath.Join(cacheRoot, cacheKey+".git")
+	_ = os.MkdirAll(cacheRoot, 0o755)
 
 	cacheHit := false
 	hitCount := 1

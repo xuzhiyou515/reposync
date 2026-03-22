@@ -10,6 +10,7 @@
 | `name` | string | 任务名称 |
 | `sourceRepoUrl` | string | 源仓库地址 |
 | `targetRepoUrl` | string | 目标仓库地址 |
+| `cacheBasePath` | string | 任务级缓存保存根路径；留空时使用默认缓存目录 |
 | `sourceCredentialId` | integer nullable | 源仓库凭证 |
 | `targetCredentialId` | integer nullable | 目标仓库凭证 |
 | `enabled` | boolean | 是否启用 |

@@ -61,6 +61,7 @@ type SyncTask struct {
 	Name                   string         `json:"name"`
 	SourceRepoURL          string         `json:"sourceRepoUrl"`
 	TargetRepoURL          string         `json:"targetRepoUrl"`
+	CacheBasePath          string         `json:"cacheBasePath"`
 	SourceCredentialID     *int64         `json:"sourceCredentialId"`
 	TargetCredentialID     *int64         `json:"targetCredentialId"`
 	Enabled                bool           `json:"enabled"`

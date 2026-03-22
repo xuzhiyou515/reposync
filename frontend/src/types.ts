@@ -23,6 +23,7 @@ export interface SyncTask {
   name: string
   sourceRepoUrl: string
   targetRepoUrl: string
+  cacheBasePath: string
   sourceCredentialId?: number | null
   targetCredentialId?: number | null
   enabled: boolean
