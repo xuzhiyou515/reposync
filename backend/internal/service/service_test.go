@@ -136,7 +136,6 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	cacheDir := filepath.Join(root, "cache")
 
 	runGit(t, "", "init", "--bare", subSourceBare)
-	runGit(t, "", "init", "--bare", subTargetBare)
 	runGit(t, "", "clone", subSourceBare, subWorktree)
 	runGit(t, subWorktree, "config", "user.name", "RepoSync Test")
 	runGit(t, subWorktree, "config", "user.email", "reposync@example.com")
@@ -146,7 +145,6 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	runGit(t, subWorktree, "push", "-u", "origin", "master")
 
 	runGit(t, "", "init", "--bare", mainSourceBare)
-	runGit(t, "", "init", "--bare", mainTargetBare)
 	runGit(t, "", "clone", mainSourceBare, mainWorktree)
 	runGit(t, mainWorktree, "config", "user.name", "RepoSync Test")
 	runGit(t, mainWorktree, "config", "user.email", "reposync@example.com")
@@ -188,6 +186,9 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	}
 	if execution.RepoCount != 2 {
 		t.Fatalf("expected 2 mirrored repositories, got %d", execution.RepoCount)
+	}
+	if execution.CreatedRepoCount != 2 {
+		t.Fatalf("expected 2 auto-created target repositories, got %d", execution.CreatedRepoCount)
 	}
 
 	assertGitRef(t, mainTargetBare, "refs/heads/master")

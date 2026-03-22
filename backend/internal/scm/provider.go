@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,7 +36,11 @@ func (m *Manager) EnsureRepository(ctx context.Context, targetRepoURL string, co
 		if existsTargetRepo(targetRepoURL) {
 			return false, 0, nil
 		}
-		return false, 0, fmt.Errorf("target repository does not exist: %s", targetRepoURL)
+		started := time.Now()
+		if err := initLocalBareRepository(ctx, targetRepoURL); err != nil {
+			return false, 0, err
+		}
+		return true, time.Since(started), nil
 	}
 
 	switch config.Provider {
@@ -226,4 +231,16 @@ func existsTargetRepo(target string) bool {
 		return headErr == nil
 	}
 	return false
+}
+
+func initLocalBareRepository(ctx context.Context, target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "git", "init", "--bare", target)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("init local bare repository %s: %w: %s", target, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }

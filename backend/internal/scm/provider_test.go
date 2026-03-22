@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"reposync/backend/internal/domain"
@@ -61,5 +63,27 @@ func TestGogsEnsureRepositorySkipsExistingRepo(t *testing.T) {
 	}
 	if autoCreated {
 		t.Fatalf("expected existing repository to skip auto-creation")
+	}
+}
+
+func TestEnsureRepositoryCreatesLocalBareRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for local repository initialization")
+	}
+
+	target := filepath.Join(t.TempDir(), "mirror.git")
+	manager := NewManager()
+	autoCreated, _, err := manager.EnsureRepository(context.Background(), target, domain.ProviderConfig{
+		Provider:   domain.ProviderGitHub,
+		Visibility: domain.VisibilityPrivate,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ensure local repository: %v", err)
+	}
+	if !autoCreated {
+		t.Fatalf("expected local repository to be auto-created")
+	}
+	if !existsTargetRepo(target) {
+		t.Fatalf("expected initialized local bare repository at %s", target)
 	}
 }
