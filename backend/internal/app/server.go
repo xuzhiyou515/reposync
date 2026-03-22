@@ -2,8 +2,14 @@ package app
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +19,7 @@ import (
 
 	"reposync/backend/internal/domain"
 	"reposync/backend/internal/git"
+	"reposync/backend/internal/scheduler"
 	"reposync/backend/internal/scm"
 	"reposync/backend/internal/security"
 	"reposync/backend/internal/service"
@@ -20,10 +27,11 @@ import (
 )
 
 type Server struct {
-	http    *http.Server
-	mux     *http.ServeMux
-	store   *store.Store
-	service *service.Service
+	http      *http.Server
+	mux       *http.ServeMux
+	store     *store.Store
+	service   *service.Service
+	scheduler *scheduler.Scheduler
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -33,10 +41,17 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	svc := service.New(dbStore, cfg.CacheDir, git.NewClient(cfg.GitBin), scm.NewManager())
+	sched := scheduler.New(svc)
 	server := &Server{
-		mux:     http.NewServeMux(),
-		store:   dbStore,
-		service: svc,
+		mux:       http.NewServeMux(),
+		store:     dbStore,
+		service:   svc,
+		scheduler: sched,
+	}
+	if tasks, err := svc.ListTasks(context.Background()); err == nil {
+		if err := sched.LoadTasks(tasks); err != nil {
+			return nil, err
+		}
 	}
 	server.routes()
 	server.http = &http.Server{
@@ -55,6 +70,9 @@ func (s *Server) ListenAndServe(addr string) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	if err := s.http.Shutdown(ctx); err != nil {
 		return err
+	}
+	if s.scheduler != nil {
+		<-s.scheduler.Stop().Done()
 	}
 	return s.store.Close()
 }
@@ -116,6 +134,10 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := s.scheduler.SyncTask(saved); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusCreated, saved)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -160,12 +182,17 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if err := s.scheduler.SyncTask(saved); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeJSON(w, http.StatusOK, saved)
 	case http.MethodDelete:
 		if err := s.service.DeleteTask(r.Context(), id); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		s.scheduler.RemoveTask(id)
 		writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -290,6 +317,24 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid task id")
 		return
 	}
+	task, taskErr := s.service.GetTask(r.Context(), id)
+	if taskErr != nil {
+		writeError(w, http.StatusNotFound, taskErr.Error())
+		return
+	}
+	if !task.Enabled || !task.TriggerConfig.EnableWebhook {
+		writeError(w, http.StatusForbidden, "webhook is disabled for this task")
+		return
+	}
+	body, readErr := io.ReadAll(r.Body)
+	if readErr != nil {
+		writeError(w, http.StatusBadRequest, "failed to read webhook body")
+		return
+	}
+	if err := validateWebhookSignature(r, body, task.TriggerConfig.WebhookSecret); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	execution, runErr := s.service.RunTask(r.Context(), id, domain.TriggerWebhook)
 	if runErr != nil {
 		writeError(w, http.StatusBadRequest, runErr.Error())
@@ -319,4 +364,38 @@ func withCORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func validateWebhookSignature(r *http.Request, body []byte, secret string) error {
+	if secret == "" {
+		return nil
+	}
+	if signature := r.Header.Get("X-Hub-Signature-256"); signature != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write(body)
+		expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(expected), []byte(signature)) {
+			return nil
+		}
+		return fmt.Errorf("invalid github webhook signature")
+	}
+	if signature := r.Header.Get("X-Gogs-Signature"); signature != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(expected), []byte(signature)) {
+			return nil
+		}
+		return fmt.Errorf("invalid gogs webhook signature")
+	}
+	if signature := r.Header.Get("X-Hub-Signature"); signature != "" {
+		mac := hmac.New(sha1.New, []byte(secret))
+		_, _ = mac.Write(body)
+		expected := "sha1=" + hex.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(expected), []byte(signature)) {
+			return nil
+		}
+		return fmt.Errorf("invalid github webhook signature")
+	}
+	return fmt.Errorf("missing webhook signature")
 }

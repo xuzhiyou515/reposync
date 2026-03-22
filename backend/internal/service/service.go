@@ -38,6 +38,10 @@ func (s *Service) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {
 	return s.store.ListTasks(ctx)
 }
 
+func (s *Service) GetTask(ctx context.Context, id int64) (domain.SyncTask, error) {
+	return s.store.GetTask(ctx, id)
+}
+
 func (s *Service) DeleteTask(ctx context.Context, id int64) error {
 	return s.store.DeleteTask(ctx, id)
 }
