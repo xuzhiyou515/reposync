@@ -592,16 +592,34 @@ h1 {
   display: grid;
   gap: 4px;
   min-width: 0;
+  max-width: 100%;
   color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
+  word-wrap: break-word;
   word-break: break-word;
+  line-break: anywhere;
+}
+
+.tree-paths > div {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-wrap: break-word;
+  word-break: break-word;
+  line-break: anywhere;
 }
 
 .error-text {
   color: #a0432f;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
   overflow-wrap: anywhere;
+  word-wrap: break-word;
   word-break: break-word;
+  line-break: anywhere;
 }
 
 .warning-text {
@@ -640,6 +658,13 @@ h1 {
 .node-detail-item strong {
   display: block;
   margin-top: 6px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-wrap: break-word;
+  word-break: break-word;
+  line-break: anywhere;
 }
 
 @media (max-width: 1024px) {

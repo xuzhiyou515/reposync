@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -573,7 +574,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		}
 		submoduleMapping := map[string]git.SubmoduleRewrite{}
 		for _, submodule := range submodules {
-			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.Path)
+			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.URL, submodule.Path)
 			logger.log(ctx, "Discovered submodule %s -> %s", submodule.Path, childTarget)
 			childResult, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, submodule.Commit, depth+1, &node.ID, submoduleCredentials, submoduleCredentials, visited, counters, logger)
 			if childErr != nil {
@@ -639,20 +640,22 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, err
 }
 
-func mapSubmoduleTarget(parentTarget string, submodulePath string) string {
-	if strings.HasSuffix(parentTarget, ".git") {
-		base := strings.TrimSuffix(parentTarget, ".git")
-		flattened := strings.ReplaceAll(strings.Trim(submodulePath, "/"), "/", "-")
-		if flattened == "" {
-			flattened = "submodule"
-		}
-		return normalizeGitTarget(base + "-" + flattened + ".git")
+func mapSubmoduleTarget(parentTarget string, submoduleURL string, submodulePath string) string {
+	repoName := submoduleRepoName(submoduleURL)
+	if repoName == "" {
+		repoName = fallbackSubmoduleRepoName(submodulePath)
 	}
-	flattened := strings.ReplaceAll(strings.Trim(submodulePath, "/"), "/", "-")
-	if flattened == "" {
-		flattened = "submodule"
+	if strings.TrimSpace(repoName) == "" {
+		repoName = "submodule"
 	}
-	return normalizeGitTarget(parentTarget + "-" + flattened + ".git")
+
+	if strings.HasPrefix(parentTarget, "git@") {
+		return normalizeGitTarget(replaceSCPTargetRepo(parentTarget, repoName))
+	}
+	if strings.HasPrefix(parentTarget, "http://") || strings.HasPrefix(parentTarget, "https://") || strings.HasPrefix(parentTarget, "ssh://") {
+		return normalizeGitTarget(replaceURLTargetRepo(parentTarget, repoName))
+	}
+	return normalizeGitTarget(replaceLocalTargetRepo(parentTarget, repoName))
 }
 
 func normalizeGitTarget(target string) string {
@@ -660,6 +663,71 @@ func normalizeGitTarget(target string) string {
 		return target
 	}
 	return filepath.ToSlash(target)
+}
+
+func submoduleRepoName(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "git@") {
+		colon := strings.LastIndex(trimmed, ":")
+		if colon >= 0 && colon+1 < len(trimmed) {
+			return gitRepoBaseName(trimmed[colon+1:])
+		}
+	}
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Path != "" {
+		return gitRepoBaseName(parsed.Path)
+	}
+	return gitRepoBaseName(trimmed)
+}
+
+func fallbackSubmoduleRepoName(submodulePath string) string {
+	trimmed := strings.Trim(strings.TrimSpace(submodulePath), "/")
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.Split(trimmed, "/")
+	return gitRepoBaseName(parts[len(parts)-1])
+}
+
+func gitRepoBaseName(raw string) string {
+	base := filepath.Base(strings.Trim(strings.ReplaceAll(raw, "\\", "/"), "/"))
+	base = strings.TrimSuffix(base, ".git")
+	return strings.TrimSpace(base)
+}
+
+func replaceLocalTargetRepo(parentTarget string, repoName string) string {
+	dir := filepath.Dir(parentTarget)
+	return filepath.Join(dir, repoName+".git")
+}
+
+func replaceURLTargetRepo(parentTarget string, repoName string) string {
+	parsed, err := url.Parse(parentTarget)
+	if err != nil || parsed.Path == "" {
+		return parentTarget
+	}
+	path := strings.TrimSuffix(parsed.Path, "/")
+	slash := strings.LastIndex(path, "/")
+	if slash < 0 {
+		parsed.Path = "/" + repoName + ".git"
+		return parsed.String()
+	}
+	parsed.Path = path[:slash+1] + repoName + ".git"
+	return parsed.String()
+}
+
+func replaceSCPTargetRepo(parentTarget string, repoName string) string {
+	colon := strings.Index(parentTarget, ":")
+	if colon < 0 || colon+1 >= len(parentTarget) {
+		return parentTarget
+	}
+	remainder := parentTarget[colon+1:]
+	slash := strings.LastIndex(remainder, "/")
+	if slash < 0 {
+		return parentTarget[:colon+1] + repoName + ".git"
+	}
+	return parentTarget[:colon+1] + remainder[:slash+1] + repoName + ".git"
 }
 
 func executionStatus(err error) domain.ExecutionStatus {

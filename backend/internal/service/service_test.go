@@ -24,6 +24,47 @@ func TestBuildCacheKeyStable(t *testing.T) {
 	}
 }
 
+func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
+	cases := []struct {
+		name         string
+		parentTarget string
+		submoduleURL string
+		submodulePath string
+		expected     string
+	}{
+		{
+			name:          "local bare path",
+			parentTarget:  filepath.ToSlash(filepath.Join("D:/repos/targets", "main.git")),
+			submoduleURL:  "https://github.com/example/libs-core.git",
+			submodulePath: "libs/core",
+			expected:      filepath.ToSlash(filepath.Join("D:/repos/targets", "libs-core.git")),
+		},
+		{
+			name:          "http target",
+			parentTarget:  "https://git.example.com/mirror/main.git",
+			submoduleURL:  "ssh://git@github.com/example/core-lib.git",
+			submodulePath: "vendor/core",
+			expected:      "https://git.example.com/mirror/core-lib.git",
+		},
+		{
+			name:          "scp target",
+			parentTarget:  "git@gogs.example.com:mirror/main.git",
+			submoduleURL:  "git@github.com:example/child.git",
+			submodulePath: "child",
+			expected:      "git@gogs.example.com:mirror/child.git",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapSubmoduleTarget(tc.parentTarget, tc.submoduleURL, tc.submodulePath)
+			if got != tc.expected {
+				t.Fatalf("expected %s, got %s", tc.expected, got)
+			}
+		})
+	}
+}
+
 func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is required for integration test")
@@ -226,14 +267,23 @@ func TestRunTaskRecursivelyMirrorsSubmodules(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	subSourceBare := filepath.Join(root, "sub-source.git")
-	subTargetBare := filepath.Join(root, "target-main-libs-core.git")
+	sourceReposDir := filepath.Join(root, "sources")
+	targetReposDir := filepath.Join(root, "targets")
+	subSourceBare := filepath.Join(sourceReposDir, "sub-source.git")
+	subTargetBare := filepath.Join(targetReposDir, "sub-source.git")
 	mainSourceBare := filepath.Join(root, "main-source.git")
-	mainTargetBare := filepath.Join(root, "target-main.git")
+	mainTargetBare := filepath.Join(targetReposDir, "target-main.git")
 	subWorktree := filepath.Join(root, "sub-work")
 	mainWorktree := filepath.Join(root, "main-work")
 	dbPath := filepath.Join(root, "reposync.db")
 	cacheDir := filepath.Join(root, "cache")
+
+	if err := os.MkdirAll(sourceReposDir, 0o755); err != nil {
+		t.Fatalf("mkdir source repos dir: %v", err)
+	}
+	if err := os.MkdirAll(targetReposDir, 0o755); err != nil {
+		t.Fatalf("mkdir target repos dir: %v", err)
+	}
 
 	runGit(t, "", "init", "--bare", subSourceBare)
 	runGit(t, "", "clone", subSourceBare, subWorktree)
@@ -337,17 +387,26 @@ func TestRunTaskRewritesGitlinkToMirroredSubmoduleCommit(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	leafSourceBare := filepath.Join(root, "leaf-source.git")
-	leafTargetBare := filepath.Join(root, "target-main-child-deps-leaf.git")
-	childSourceBare := filepath.Join(root, "child-source.git")
-	childTargetBare := filepath.Join(root, "target-main-child.git")
+	sourceReposDir := filepath.Join(root, "sources")
+	targetReposDir := filepath.Join(root, "targets")
+	leafSourceBare := filepath.Join(sourceReposDir, "leaf-source.git")
+	leafTargetBare := filepath.Join(targetReposDir, "leaf-source.git")
+	childSourceBare := filepath.Join(sourceReposDir, "child-source.git")
+	childTargetBare := filepath.Join(targetReposDir, "child-source.git")
 	mainSourceBare := filepath.Join(root, "main-source.git")
-	mainTargetBare := filepath.Join(root, "target-main.git")
+	mainTargetBare := filepath.Join(targetReposDir, "target-main.git")
 	leafWorktree := filepath.Join(root, "leaf-work")
 	childWorktree := filepath.Join(root, "child-work")
 	mainWorktree := filepath.Join(root, "main-work")
 	dbPath := filepath.Join(root, "reposync.db")
 	cacheDir := filepath.Join(root, "cache")
+
+	if err := os.MkdirAll(sourceReposDir, 0o755); err != nil {
+		t.Fatalf("mkdir source repos dir: %v", err)
+	}
+	if err := os.MkdirAll(targetReposDir, 0o755); err != nil {
+		t.Fatalf("mkdir target repos dir: %v", err)
+	}
 
 	runGit(t, "", "init", "--bare", leafSourceBare)
 	runGit(t, "", "clone", leafSourceBare, leafWorktree)
