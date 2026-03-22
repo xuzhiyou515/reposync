@@ -7,6 +7,10 @@ const http = axios.create({
 
 export const api = {
   executionStreamUrl: (id: number) => `/api/executions/${id}/stream`,
+  executionWebSocketUrl: (id: number) => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}/api/executions/${id}/ws`
+  },
   listTasks: async () => (await http.get<SyncTask[]>('/tasks')).data,
   saveTask: async (task: Partial<SyncTask>) => {
     if (task.id) {

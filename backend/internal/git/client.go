@@ -7,13 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"reposync/backend/internal/domain"
 )
 
 type Client struct {
@@ -53,38 +57,61 @@ func (c *Client) WithLogger(logf func(format string, args ...any)) *Client {
 	}
 }
 
-func (c *Client) EnsureMirror(ctx context.Context, sourceURL string, cachePath string) (bool, time.Duration, error) {
+func (c *Client) EnsureMirror(ctx context.Context, sourceURL string, cachePath string, credential *domain.Credential) (bool, time.Duration, error) {
 	started := time.Now()
 	cacheHit := isGitMirror(cachePath)
+	authURL, env, cleanup, err := prepareGitAuth(sourceURL, credential)
+	if err != nil {
+		return cacheHit, 0, err
+	}
+	defer cleanup()
 
 	if !cacheHit {
 		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 			return false, 0, err
 		}
-		if _, err := c.run(ctx, "", "clone", "--mirror", sourceURL, cachePath); err != nil {
+		if _, err := c.runWithEnv(ctx, "", env, "clone", "--mirror", authURL, cachePath); err != nil {
 			return false, 0, err
+		}
+		if authURL != sourceURL {
+			if _, err := c.run(ctx, cachePath, "remote", "set-url", "origin", sourceURL); err != nil {
+				return false, 0, err
+			}
 		}
 		return false, time.Since(started), nil
 	}
 
-	if _, err := c.run(ctx, cachePath, "remote", "set-url", "origin", sourceURL); err != nil {
+	if _, err := c.run(ctx, cachePath, "remote", "set-url", "origin", authURL); err != nil {
 		return true, 0, err
 	}
-	if _, err := c.run(ctx, cachePath, "fetch", "--prune", "origin", "+refs/*:refs/*"); err != nil {
+	if _, err := c.runWithEnv(ctx, cachePath, env, "fetch", "--prune", "origin", "+refs/*:refs/*"); err != nil {
 		return true, 0, err
+	}
+	if authURL != sourceURL {
+		if _, err := c.run(ctx, cachePath, "remote", "set-url", "origin", sourceURL); err != nil {
+			return true, 0, err
+		}
 	}
 	return true, time.Since(started), nil
 }
 
-func (c *Client) MirrorPush(ctx context.Context, cachePath string, targetURL string) (time.Duration, error) {
+func (c *Client) MirrorPush(ctx context.Context, cachePath string, targetURL string, credential *domain.Credential) (time.Duration, error) {
 	started := time.Now()
+	authURL, env, cleanup, err := prepareGitAuth(targetURL, credential)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
 	if _, err := c.run(ctx, cachePath, "remote", "remove", "reposync-target"); err != nil && !strings.Contains(err.Error(), "No such remote") {
 		return 0, err
 	}
-	if _, err := c.run(ctx, cachePath, "remote", "add", "reposync-target", targetURL); err != nil {
+	if _, err := c.run(ctx, cachePath, "remote", "add", "reposync-target", authURL); err != nil {
 		return 0, err
 	}
-	if _, err := c.run(ctx, cachePath, "push", "--mirror", "reposync-target"); err != nil {
+	if _, err := c.runWithEnv(ctx, cachePath, env, "push", "--mirror", "reposync-target"); err != nil {
+		return 0, err
+	}
+	if _, err := c.run(ctx, cachePath, "remote", "remove", "reposync-target"); err != nil && !strings.Contains(err.Error(), "No such remote") {
 		return 0, err
 	}
 	return time.Since(started), nil
@@ -127,13 +154,18 @@ func (c *Client) ReadSubmodules(ctx context.Context, repoPath string) ([]Submodu
 	return result, nil
 }
 
-func (c *Client) RewriteSubmodulesAndPushBranches(ctx context.Context, cachePath string, targetURL string, mapping map[string]SubmoduleRewrite) (RewriteResult, time.Duration, error) {
+func (c *Client) RewriteSubmodulesAndPushBranches(ctx context.Context, cachePath string, targetURL string, mapping map[string]SubmoduleRewrite, credential *domain.Credential) (RewriteResult, time.Duration, error) {
 	started := time.Now()
 	tempDir, err := os.MkdirTemp("", "reposync-rewrite-*")
 	if err != nil {
 		return RewriteResult{}, 0, err
 	}
 	defer os.RemoveAll(tempDir)
+	authURL, env, cleanup, err := prepareGitAuth(targetURL, credential)
+	if err != nil {
+		return RewriteResult{}, 0, err
+	}
+	defer cleanup()
 
 	if _, err := c.run(ctx, "", "clone", cachePath, tempDir); err != nil {
 		return RewriteResult{}, 0, err
@@ -144,7 +176,7 @@ func (c *Client) RewriteSubmodulesAndPushBranches(ctx context.Context, cachePath
 	if _, err := c.run(ctx, tempDir, "config", "user.email", "reposync@example.com"); err != nil {
 		return RewriteResult{}, 0, err
 	}
-	if _, err := c.run(ctx, tempDir, "remote", "add", "reposync-target", targetURL); err != nil && !strings.Contains(err.Error(), "already exists") {
+	if _, err := c.run(ctx, tempDir, "remote", "add", "reposync-target", authURL); err != nil && !strings.Contains(err.Error(), "already exists") {
 		return RewriteResult{}, 0, err
 	}
 
@@ -195,7 +227,7 @@ func (c *Client) RewriteSubmodulesAndPushBranches(ctx context.Context, cachePath
 		}
 		targetHead := strings.TrimSpace(targetHeadOut)
 		result.SourceToTarget[sourceHead] = targetHead
-		if _, err := c.run(ctx, tempDir, "push", "--force", "reposync-target", "HEAD:refs/heads/"+branch); err != nil {
+		if _, err := c.runWithEnv(ctx, tempDir, env, "push", "--force", "reposync-target", "HEAD:refs/heads/"+branch); err != nil {
 			return RewriteResult{}, 0, err
 		}
 	}
@@ -216,7 +248,7 @@ func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args 
 		cmd.Env = append(os.Environ(), env...)
 	}
 	if c.logf != nil {
-		c.logf("git exec: %s", strings.Join(args, " "))
+		c.logf("git exec: %s", sanitizeArgs(args))
 	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -243,12 +275,12 @@ func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args 
 			msg = waitErr.Error()
 		}
 		if c.logf != nil {
-			c.logf("git error: %s", msg)
+			c.logf("git error: %s", sanitizeMessage(msg))
 		}
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), errors.New(msg))
+		return "", fmt.Errorf("git %s: %w", sanitizeArgs(args), errors.New(sanitizeMessage(msg)))
 	}
 	if c.logf != nil {
-		c.logf("git done: %s", strings.Join(args, " "))
+		c.logf("git done: %s", sanitizeArgs(args))
 	}
 	return stdout.String(), nil
 }
@@ -403,4 +435,76 @@ func rewriteGitmodulesFile(path string, mapping map[string]SubmoduleRewrite) (bo
 		return false, nil
 	}
 	return true, os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+func prepareGitAuth(rawURL string, credential *domain.Credential) (string, []string, func(), error) {
+	if credential == nil {
+		return rawURL, nil, func() {}, nil
+	}
+	switch credential.Type {
+	case domain.CredentialTypeHTTPSToken, domain.CredentialTypeAPIToken:
+		parsed, err := url.Parse(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return rawURL, nil, func() {}, nil
+		}
+		username := strings.TrimSpace(credential.Username)
+		if username == "" {
+			username = "git"
+		}
+		parsed.User = url.UserPassword(username, credential.Secret)
+		return parsed.String(), nil, func() {}, nil
+	case domain.CredentialTypeSSHKey:
+		keyFile, err := os.CreateTemp("", "reposync-key-*")
+		if err != nil {
+			return rawURL, nil, nil, err
+		}
+		if err := keyFile.Close(); err != nil {
+			_ = os.Remove(keyFile.Name())
+			return rawURL, nil, nil, err
+		}
+		if err := os.WriteFile(keyFile.Name(), []byte(credential.Secret), 0o600); err != nil {
+			_ = os.Remove(keyFile.Name())
+			return rawURL, nil, nil, err
+		}
+		configTarget := "/dev/null"
+		if runtime.GOOS == "windows" {
+			configTarget = "NUL"
+		}
+		sshCommand := fmt.Sprintf(`ssh -i "%s" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -F %s`, keyFile.Name(), configTarget)
+		return rawURL, []string{"GIT_SSH_COMMAND=" + sshCommand}, func() { _ = os.Remove(keyFile.Name()) }, nil
+	default:
+		return rawURL, nil, func() {}, nil
+	}
+}
+
+func sanitizeArgs(args []string) string {
+	safe := make([]string, len(args))
+	for i, arg := range args {
+		safe[i] = sanitizeArg(arg)
+	}
+	return strings.Join(safe, " ")
+}
+
+func sanitizeMessage(message string) string {
+	fields := strings.Fields(message)
+	if len(fields) == 0 {
+		return message
+	}
+	for i, field := range fields {
+		fields[i] = sanitizeArg(field)
+	}
+	return strings.Join(fields, " ")
+}
+
+func sanitizeArg(arg string) string {
+	parsed, err := url.Parse(arg)
+	if err != nil || parsed.User == nil {
+		return arg
+	}
+	username := parsed.User.Username()
+	if username == "" {
+		username = "git"
+	}
+	parsed.User = url.UserPassword(username, "***")
+	return parsed.String()
 }

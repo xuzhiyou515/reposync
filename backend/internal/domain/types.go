@@ -57,25 +57,28 @@ type ProviderConfig struct {
 }
 
 type SyncTask struct {
-	ID                     int64          `json:"id"`
-	Name                   string         `json:"name"`
-	SourceRepoURL          string         `json:"sourceRepoUrl"`
-	TargetRepoURL          string         `json:"targetRepoUrl"`
-	CacheBasePath          string         `json:"cacheBasePath"`
-	SourceCredentialID     *int64         `json:"sourceCredentialId"`
-	TargetCredentialID     *int64         `json:"targetCredentialId"`
-	TargetAPICredentialID  *int64         `json:"targetApiCredentialId"`
-	Enabled                bool           `json:"enabled"`
-	RecursiveSubmodules    bool           `json:"recursiveSubmodules"`
-	SyncAllRefs            bool           `json:"syncAllRefs"`
-	TriggerConfig          TriggerConfig  `json:"triggerConfig"`
-	ProviderConfig         ProviderConfig `json:"providerConfig"`
-	LastExecutionStatus    string         `json:"lastExecutionStatus,omitempty"`
-	LastExecutionAt        *time.Time     `json:"lastExecutionAt,omitempty"`
-	LastExecutionRepoCount int            `json:"lastExecutionRepoCount,omitempty"`
-	LastCreatedRepoCount   int            `json:"lastCreatedRepoCount,omitempty"`
-	CreatedAt              time.Time      `json:"createdAt"`
-	UpdatedAt              time.Time      `json:"updatedAt"`
+	ID                             int64          `json:"id"`
+	Name                           string         `json:"name"`
+	SourceRepoURL                  string         `json:"sourceRepoUrl"`
+	TargetRepoURL                  string         `json:"targetRepoUrl"`
+	CacheBasePath                  string         `json:"cacheBasePath"`
+	SourceCredentialID             *int64         `json:"sourceCredentialId"`
+	SubmoduleSourceCredentialID    *int64         `json:"submoduleSourceCredentialId"`
+	TargetCredentialID             *int64         `json:"targetCredentialId"`
+	SubmoduleTargetCredentialID    *int64         `json:"submoduleTargetCredentialId"`
+	TargetAPICredentialID          *int64         `json:"targetApiCredentialId"`
+	SubmoduleTargetAPICredentialID *int64         `json:"submoduleTargetApiCredentialId"`
+	Enabled                        bool           `json:"enabled"`
+	RecursiveSubmodules            bool           `json:"recursiveSubmodules"`
+	SyncAllRefs                    bool           `json:"syncAllRefs"`
+	TriggerConfig                  TriggerConfig  `json:"triggerConfig"`
+	ProviderConfig                 ProviderConfig `json:"providerConfig"`
+	LastExecutionStatus            string         `json:"lastExecutionStatus,omitempty"`
+	LastExecutionAt                *time.Time     `json:"lastExecutionAt,omitempty"`
+	LastExecutionRepoCount         int            `json:"lastExecutionRepoCount,omitempty"`
+	LastCreatedRepoCount           int            `json:"lastCreatedRepoCount,omitempty"`
+	CreatedAt                      time.Time      `json:"createdAt"`
+	UpdatedAt                      time.Time      `json:"updatedAt"`
 }
 
 type Credential struct {

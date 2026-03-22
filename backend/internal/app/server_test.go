@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 
 	"reposync/backend/internal/domain"
 	"reposync/backend/internal/git"
@@ -125,6 +128,70 @@ func TestHandleExecutionStreamWritesEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, `"summaryLog":"line 1"`) {
 		t.Fatalf("expected execution payload in stream, got %q", body)
+	}
+}
+
+func TestHandleExecutionWebSocketWritesEvent(t *testing.T) {
+	db := filepathJoinTemp(t, "reposync.db")
+	box := security.NewSecretBox("test-secret")
+	dbStore, err := store.New(db, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer dbStore.Close()
+
+	svc := service.New(dbStore, filepathJoinTemp(t, "cache"), git.NewClient("git"), scm.NewManager())
+	ctx := context.Background()
+	_, err = dbStore.SaveTask(ctx, domain.SyncTask{
+		Name:           "demo",
+		SourceRepoURL:  "src",
+		TargetRepoURL:  "dst",
+		Enabled:        true,
+		SyncAllRefs:    true,
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+		TriggerConfig:  domain.TriggerConfig{},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	execution, err := dbStore.CreateExecution(ctx, domain.SyncExecution{
+		TaskID:      1,
+		TriggerType: domain.TriggerManual,
+		Status:      domain.ExecutionStatusSuccess,
+		SummaryLog:  "line 1",
+	})
+	if err != nil {
+		t.Fatalf("create execution: %v", err)
+	}
+
+	server := &Server{mux: http.NewServeMux(), store: dbStore, service: svc}
+	server.routes()
+	testServer := httptest.NewServer(server.mux)
+	defer testServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(testServer.URL, "http") + "/api/executions/" + strconv.FormatInt(execution.ID, 10) + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	_, message, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read websocket message: %v", err)
+	}
+	var payload struct {
+		Type   string                 `json:"type"`
+		Detail domain.ExecutionDetail `json:"detail"`
+	}
+	if err := json.Unmarshal(message, &payload); err != nil {
+		t.Fatalf("unmarshal websocket payload: %v", err)
+	}
+	if payload.Type != "execution" {
+		t.Fatalf("expected execution payload type, got %q", payload.Type)
+	}
+	if payload.Detail.Execution.SummaryLog != "line 1" {
+		t.Fatalf("expected summary log in websocket payload, got %q", payload.Detail.Execution.SummaryLog)
 	}
 }
 

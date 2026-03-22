@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import type { ElTree } from 'element-plus'
 import { api } from '../api'
 import type { Credential, ExecutionDetail, RepoCache, ScheduleStatus, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
 
@@ -18,6 +19,8 @@ const errorOnly = ref(false)
 const selectedNodeId = ref<number | null>(null)
 const webhookStatusFilter = ref<'all' | 'accepted' | 'ignored' | 'rejected' | 'failed' | 'blocked'>('all')
 let executionStream: EventSource | null = null
+let executionSocket: WebSocket | null = null
+const executionTreeRef = ref<InstanceType<typeof ElTree>>()
 
 const emptyTask = (): Partial<SyncTask> => ({
   name: '',
@@ -27,7 +30,10 @@ const emptyTask = (): Partial<SyncTask> => ({
   enabled: true,
   recursiveSubmodules: true,
   syncAllRefs: true,
+  submoduleSourceCredentialId: undefined,
+  submoduleTargetCredentialId: undefined,
   targetApiCredentialId: undefined,
+  submoduleTargetApiCredentialId: undefined,
   triggerConfig: {
     cron: '0 */30 * * * *',
     webhookSecret: '',
@@ -87,14 +93,12 @@ const taskFormWebhookPreview = computed(() => {
   return `/api/webhooks/${provider}/${taskId}`
 })
 
-type TreeRow = SyncExecutionNode & {
+type ExecutionTreeNode = SyncExecutionNode & {
   label: string
-  level: number
-  hasChildren: boolean
-  expanded: boolean
+  children: ExecutionTreeNode[]
 }
 
-const executionTreeRows = computed<TreeRow[]>(() => {
+const executionTreeData = computed<ExecutionTreeNode[]>(() => {
   if (!selectedExecution.value) {
     return []
   }
@@ -106,32 +110,23 @@ const executionTreeRows = computed<TreeRow[]>(() => {
     childrenByParent.set(parent, list)
   }
 
-  const result: TreeRow[] = []
-  const visit = (parentId: number | null, level: number, visible: boolean) => {
+  const build = (parentId: number | null): ExecutionTreeNode[] => {
     const children = (childrenByParent.get(parentId) ?? []).sort((left, right) => left.repoPath.localeCompare(right.repoPath))
-    if (!visible) {
-      return
-    }
+    const result: ExecutionTreeNode[] = []
     children.forEach((node) => {
-      const nodeChildren = childrenByParent.get(node.id) ?? []
-      const hasChildren = nodeChildren.length > 0
-      const expanded = expandedNodeIds.value.has(node.id)
-      const matchesFilter = !errorOnly.value || node.status === 'failed' || !!node.errorMessage
-      if (matchesFilter) {
+      const descendants = build(node.id)
+      const matchesSelf = node.status === 'failed' || !!node.errorMessage
+      if (!errorOnly.value || matchesSelf || descendants.length > 0) {
         result.push({
           ...node,
           label: node.repoPath || '(root)',
-          level,
-          hasChildren,
-          expanded,
+          children: descendants,
         })
       }
-      visit(node.id, level + 1, expanded)
     })
+    return result
   }
-
-  visit(null, 0, true)
-  return result
+  return build(null)
 })
 
 const selectedExecutionStats = computed(() => {
@@ -211,21 +206,27 @@ const loadWebhookEvents = async (taskId: number) => {
 }
 
 const stopExecutionStreaming = () => {
+  if (executionSocket) {
+    executionSocket.onclose = null
+    executionSocket.onerror = null
+    executionSocket.onmessage = null
+    executionSocket.close()
+    executionSocket = null
+  }
   if (executionStream) {
+    executionStream.onerror = null
     executionStream.close()
     executionStream = null
   }
 }
 
-const refreshSelectedExecution = async () => {
-  if (!selectedExecution.value) {
-    return
-  }
-  const detail = await api.executionDetail(selectedExecution.value.execution.id)
+const applyExecutionDetail = async (detail: ExecutionDetail) => {
   selectedExecution.value = detail
   if (selectedNodeId.value == null) {
     selectedNodeId.value = detail.nodes[0]?.id ?? null
   }
+  await nextTick()
+  syncTreeExpansion()
   if (detail.execution.status !== 'running') {
     stopExecutionStreaming()
     if (executionTaskId.value != null) {
@@ -235,30 +236,71 @@ const refreshSelectedExecution = async () => {
   }
 }
 
-const ensureExecutionStreaming = () => {
-  stopExecutionStreaming()
+const refreshSelectedExecution = async () => {
+  if (!selectedExecution.value) {
+    return
+  }
+  await applyExecutionDetail(await api.executionDetail(selectedExecution.value.execution.id))
+}
+
+const startEventSourceExecutionStream = () => {
   if (!selectedExecution.value || selectedExecution.value.execution.status !== 'running') {
     return
   }
   executionStream = new EventSource(api.executionStreamUrl(selectedExecution.value.execution.id))
   executionStream.addEventListener('execution', (event) => {
     const message = event as MessageEvent<string>
-    const detail = JSON.parse(message.data) as ExecutionDetail
-    selectedExecution.value = detail
-    if (selectedNodeId.value == null) {
-      selectedNodeId.value = detail.nodes[0]?.id ?? null
+    const payload = JSON.parse(message.data) as { detail?: ExecutionDetail }
+    if (payload.detail) {
+      void applyExecutionDetail(payload.detail)
+      return
     }
-    if (detail.execution.status !== 'running') {
-      stopExecutionStreaming()
-      void loadTasks()
-      if (executionTaskId.value != null) {
-        void loadExecutions(executionTaskId.value)
-      }
-    }
+    void applyExecutionDetail(JSON.parse(message.data) as ExecutionDetail)
   })
   executionStream.onerror = () => {
     stopExecutionStreaming()
     void refreshSelectedExecution()
+  }
+}
+
+const ensureExecutionStreaming = () => {
+  stopExecutionStreaming()
+  if (!selectedExecution.value || selectedExecution.value.execution.status !== 'running') {
+    return
+  }
+  let fallbackStarted = false
+  const startFallback = () => {
+    if (fallbackStarted || !selectedExecution.value || selectedExecution.value.execution.status !== 'running') {
+      return
+    }
+    fallbackStarted = true
+    if (executionSocket) {
+      executionSocket.onclose = null
+      executionSocket.onerror = null
+      executionSocket.onmessage = null
+      executionSocket.close()
+      executionSocket = null
+    }
+    startEventSourceExecutionStream()
+  }
+  try {
+    executionSocket = new WebSocket(api.executionWebSocketUrl(selectedExecution.value.execution.id))
+    executionSocket.onmessage = (event) => {
+      const payload = JSON.parse(event.data) as { detail?: ExecutionDetail }
+      if (payload.detail) {
+        void applyExecutionDetail(payload.detail)
+      }
+    }
+    executionSocket.onerror = () => {
+      startFallback()
+    }
+    executionSocket.onclose = () => {
+      if (selectedExecution.value?.execution.status === 'running') {
+        startFallback()
+      }
+    }
+  } catch (_error) {
+    startEventSourceExecutionStream()
   }
 }
 
@@ -358,6 +400,8 @@ const openExecution = async (execution: SyncExecution) => {
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
   errorOnly.value = false
   selectedNodeId.value = selectedExecution.value.nodes[0]?.id ?? null
+  await nextTick()
+  syncTreeExpansion()
   ensureExecutionStreaming()
 }
 
@@ -469,29 +513,48 @@ const webhookReasonLabel = (reason?: string) => {
   return reason
 }
 
-const toggleNode = (nodeId: number) => {
-  const next = new Set(expandedNodeIds.value)
-  if (next.has(nodeId)) {
-    next.delete(nodeId)
-  } else {
-    next.add(nodeId)
-  }
-  expandedNodeIds.value = next
-}
-
 const expandAllNodes = () => {
   if (!selectedExecution.value) {
     return
   }
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
+  void nextTick().then(syncTreeExpansion)
 }
 
 const collapseAllNodes = () => {
   expandedNodeIds.value = new Set()
+  void nextTick().then(syncTreeExpansion)
 }
 
-const selectNode = (nodeId: number) => {
-  selectedNodeId.value = nodeId
+const selectNode = (node: SyncExecutionNode | number) => {
+  selectedNodeId.value = typeof node === 'number' ? node : node.id
+}
+
+const syncTreeExpansion = () => {
+  const tree = executionTreeRef.value
+  if (!tree || !selectedExecution.value) {
+    return
+  }
+  selectedExecution.value.nodes.forEach((node) => {
+    tree.store.nodesMap[node.id]?.expand()
+    if (!expandedNodeIds.value.has(node.id)) {
+      tree.store.nodesMap[node.id]?.collapse()
+    }
+  })
+}
+
+const onTreeNodeClick = (node: ExecutionTreeNode) => {
+  selectNode(node)
+}
+
+const onTreeNodeExpand = (node: ExecutionTreeNode) => {
+  expandedNodeIds.value = new Set(expandedNodeIds.value).add(node.id)
+}
+
+const onTreeNodeCollapse = (node: ExecutionTreeNode) => {
+  const next = new Set(expandedNodeIds.value)
+  next.delete(node.id)
+  expandedNodeIds.value = next
 }
 
 onMounted(async () => {
@@ -570,11 +633,31 @@ onBeforeUnmount(() => {
                   </el-select>
                 </el-form-item>
               </div>
+              <div class="two-column">
+                <el-form-item label="子模块源凭证">
+                  <el-select v-model="taskForm.submoduleSourceCredentialId" clearable>
+                    <el-option v-for="item in credentials" :key="`sub-src-${item.id}`" :label="item.name" :value="item.id" />
+                  </el-select>
+                  <div class="field-help">留空时回退到“源凭证”，用于子模块递归拉取。</div>
+                </el-form-item>
+                <el-form-item label="子模块目标凭证">
+                  <el-select v-model="taskForm.submoduleTargetCredentialId" clearable>
+                    <el-option v-for="item in credentials" :key="`sub-dst-${item.id}`" :label="item.name" :value="item.id" />
+                  </el-select>
+                  <div class="field-help">留空时回退到“目标凭证”，用于子模块镜像推送。</div>
+                </el-form-item>
+              </div>
               <el-form-item label="目标平台 API 凭证">
                 <el-select v-model="taskForm.targetApiCredentialId" clearable>
                   <el-option v-for="item in credentials" :key="`api-${item.id}`" :label="item.name" :value="item.id" />
                 </el-select>
                 <div class="field-help">留空时默认回退到“目标凭证”，用于兼容旧任务配置。</div>
+              </el-form-item>
+              <el-form-item label="子模块目标平台 API 凭证">
+                <el-select v-model="taskForm.submoduleTargetApiCredentialId" clearable>
+                  <el-option v-for="item in credentials" :key="`sub-api-${item.id}`" :label="item.name" :value="item.id" />
+                </el-select>
+                <div class="field-help">留空时回退到“目标平台 API 凭证”，用于子模块自动建仓。</div>
               </el-form-item>
               <div class="two-column">
                 <el-form-item label="目标平台">
@@ -970,47 +1053,42 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="execution-layout">
-                <div class="tree-list">
-                  <div
-                    v-for="node in executionTreeRows"
-                    :key="node.id"
-                    class="tree-row"
-                    :class="{ 'tree-row-active': selectedNodeId === node.id }"
-                    @click="selectNode(node.id)"
+                <div class="tree-panel">
+                  <el-tree
+                    ref="executionTreeRef"
+                    :data="executionTreeData"
+                    node-key="id"
+                    :current-node-key="selectedNodeId ?? undefined"
+                    :expand-on-click-node="false"
+                    highlight-current
+                    empty-text="暂无执行节点"
+                    @node-click="onTreeNodeClick"
+                    @node-expand="onTreeNodeExpand"
+                    @node-collapse="onTreeNodeCollapse"
                   >
-                    <div class="tree-left">
-                      <div class="tree-indent" :style="{ '--tree-level': String(node.level) }"></div>
-                      <div class="tree-node">
+                    <template #default="{ data }">
+                      <div class="tree-node-card" :class="{ 'tree-node-card-active': selectedNodeId === data.id }">
                         <div class="tree-title">
-                          <button
-                            v-if="node.hasChildren"
-                            class="tree-toggle"
-                            type="button"
-                            @click.stop="toggleNode(node.id)"
-                          >
-                            {{ node.expanded ? '−' : '+' }}
-                          </button>
-                          <span v-else class="tree-toggle tree-toggle-placeholder">·</span>
-                          <span class="mono">{{ node.label }}</span>
-                          <el-tag size="small" :type="taskStatusType(node.status)">{{ node.status }}</el-tag>
+                          <span class="mono">{{ data.label }}</span>
+                          <el-tag size="small" :type="taskStatusType(data.status)">{{ data.status }}</el-tag>
                         </div>
                         <div class="tree-meta">
-                          <span>depth {{ node.depth }}</span>
-                          <span>cache {{ node.cacheHit ? 'hit' : 'miss' }}</span>
-                          <span>auto-create {{ node.autoCreated ? 'yes' : 'no' }}</span>
-                          <span>create {{ node.createDurationMs }}ms</span>
-                          <span>fetch {{ node.fetchDurationMs }}ms</span>
-                          <span>push {{ node.pushDurationMs }}ms</span>
+                          <span>depth {{ data.depth }}</span>
+                          <span>cache {{ data.cacheHit ? 'hit' : 'miss' }}</span>
+                          <span>auto-create {{ data.autoCreated ? 'yes' : 'no' }}</span>
+                          <span>create {{ data.createDurationMs }}ms</span>
+                          <span>fetch {{ data.fetchDurationMs }}ms</span>
+                          <span>push {{ data.pushDurationMs }}ms</span>
                         </div>
                         <div class="tree-paths mono">
-                          <div>src: {{ node.sourceRepoUrl }}</div>
-                          <div>dst: {{ node.targetRepoUrl }}</div>
-                          <div v-if="node.referenceCommit">ref: {{ node.referenceCommit }}</div>
-                          <div v-if="node.errorMessage" class="error-text">error: {{ node.errorMessage }}</div>
+                          <div>src: {{ data.sourceRepoUrl }}</div>
+                          <div>dst: {{ data.targetRepoUrl }}</div>
+                          <div v-if="data.referenceCommit">ref: {{ data.referenceCommit }}</div>
+                          <div v-if="data.errorMessage" class="error-text">error: {{ data.errorMessage }}</div>
                         </div>
                       </div>
-                    </div>
-                  </div>
+                    </template>
+                  </el-tree>
                 </div>
                 <div v-if="selectedExecutionNode" class="node-detail-card">
                   <div class="panel-header">

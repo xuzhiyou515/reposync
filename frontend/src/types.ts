@@ -25,8 +25,11 @@ export interface SyncTask {
   targetRepoUrl: string
   cacheBasePath: string
   sourceCredentialId?: number | null
+  submoduleSourceCredentialId?: number | null
   targetCredentialId?: number | null
+  submoduleTargetCredentialId?: number | null
   targetApiCredentialId?: number | null
+  submoduleTargetApiCredentialId?: number | null
   enabled: boolean
   recursiveSubmodules: boolean
   syncAllRefs: boolean

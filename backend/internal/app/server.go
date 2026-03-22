@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"reposync/backend/internal/domain"
 	"reposync/backend/internal/git"
 	"reposync/backend/internal/scheduler"
@@ -32,6 +34,10 @@ type Server struct {
 	store     *store.Store
 	service   *service.Service
 	scheduler *scheduler.Scheduler
+}
+
+var executionStreamUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -372,6 +378,14 @@ func (s *Server) handleExecutionByID(w http.ResponseWriter, r *http.Request) {
 		s.handleExecutionStream(w, r, id)
 		return
 	}
+	if len(tail) == 1 && tail[0] == "ws" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleExecutionWebSocket(w, r, id)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -399,11 +413,10 @@ func (s *Server) handleExecutionStream(w http.ResponseWriter, r *http.Request, i
 
 	lastSignature := ""
 	writeDetail := func(detail domain.ExecutionDetail) error {
-		payload, err := json.Marshal(detail)
+		payload, signature, err := executionStreamPayload(detail)
 		if err != nil {
 			return err
 		}
-		signature := fmt.Sprintf("%s|%s|%d", detail.Execution.Status, detail.Execution.SummaryLog, len(detail.Nodes))
 		if signature == lastSignature {
 			return nil
 		}
@@ -441,6 +454,80 @@ func (s *Server) handleExecutionStream(w http.ResponseWriter, r *http.Request, i
 			}
 		}
 	}
+}
+
+func (s *Server) handleExecutionWebSocket(w http.ResponseWriter, r *http.Request, id int64) {
+	conn, err := executionStreamUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, readErr := conn.ReadMessage(); readErr != nil {
+				return
+			}
+		}
+	}()
+
+	lastSignature := ""
+	writeDetail := func(detail domain.ExecutionDetail) error {
+		payload, signature, err := executionStreamPayload(detail)
+		if err != nil {
+			return err
+		}
+		if signature == lastSignature {
+			return nil
+		}
+		lastSignature = signature
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		return conn.WriteMessage(websocket.TextMessage, payload)
+	}
+
+	detail, err := s.service.ExecutionDetail(r.Context(), id)
+	if err != nil {
+		return
+	}
+	if err := writeDetail(detail); err != nil {
+		return
+	}
+
+	for {
+		if detail.Execution.Status != domain.ExecutionStatusRunning {
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			detail, err = s.service.ExecutionDetail(r.Context(), id)
+			if err != nil {
+				return
+			}
+			if err := writeDetail(detail); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func executionStreamPayload(detail domain.ExecutionDetail) ([]byte, string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"type":   "execution",
+		"detail": detail,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, string(payload), nil
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
