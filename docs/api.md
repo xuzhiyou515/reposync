@@ -77,3 +77,38 @@
 
 基于一条历史 Webhook 记录重新触发一次同步。
 
+
+## 8. SVN ? Git ????
+
+?? `svn_import` ?????????????????? `POST /api/tasks` ? `PUT /api/tasks/:id` ?????????
+
+?????
+- `taskType` ? `svn_import` ??`sourceRepoUrl` ???? Git ???????? `svnConfig.svnUrl` ?? SVN ??
+- `triggerConfig.enableWebhook` ? `svn_import` ??????
+- `providerConfig` ????? Git ???????
+- `POST /api/tasks/:id/run` ? `svn_import` ?? `git svn` ????
+
+???????
+
+```json
+{
+  "taskType": "svn_import",
+  "name": "svn-main",
+  "targetRepoUrl": "git@gogs.example.com:mirror/svn-main.git",
+  "enabled": true,
+  "triggerConfig": {
+    "cron": "0 */30 * * * *",
+    "enableSchedule": true,
+    "enableWebhook": false,
+    "branchReference": ""
+  },
+  "svnConfig": {
+    "svnUrl": "https://svn.example.com/repos/project",
+    "svnCredentialId": 10,
+    "svnLayout": "standard",
+    "authorsFilePath": "configs/authors.txt",
+    "defaultAuthorDomain": "example.com",
+    "gitSvnMetadataEnabled": true
+  }
+}
+```
