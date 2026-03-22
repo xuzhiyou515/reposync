@@ -505,6 +505,21 @@ ON CONFLICT(cache_key) DO UPDATE SET
 	return err
 }
 
+func (s *Store) GetCacheByKey(ctx context.Context, cacheKey string) (domain.RepoCache, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, cache_key, source_repo_url, auth_context, cache_path, last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message
+FROM repo_caches WHERE cache_key = ?`, cacheKey)
+	var item domain.RepoCache
+	var lastFetch sql.NullString
+	var lastUsed sql.NullString
+	if err := row.Scan(&item.ID, &item.CacheKey, &item.SourceRepoURL, &item.AuthContext, &item.CachePath, &lastFetch, &lastUsed, &item.HitCount, &item.SizeBytes, &item.HealthStatus, &item.LastErrorMessage); err != nil {
+		return item, err
+	}
+	item.LastFetchAt = parseNullableTime(lastFetch)
+	item.LastUsedAt = parseNullableTime(lastUsed)
+	return item, nil
+}
+
 func (s *Store) ListCaches(ctx context.Context) ([]domain.RepoCache, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, cache_key, source_repo_url, auth_context, cache_path, last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message

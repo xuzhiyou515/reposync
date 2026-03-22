@@ -7,6 +7,7 @@
 - [数据模型](./data-model.md)
 - [API 设计](./api.md)
 - [开发里程碑](./roadmap.md)
+- [开发进度](./progress.md)
 
 ## 当前仓库状态
 - 已初始化后端 `Go` 工程骨架：`backend/`

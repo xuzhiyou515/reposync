@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"reposync/backend/internal/domain"
+	"reposync/backend/internal/git"
 	"reposync/backend/internal/security"
 	"reposync/backend/internal/service"
 	"reposync/backend/internal/store"
@@ -30,7 +31,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	svc := service.New(dbStore, cfg.CacheDir)
+	svc := service.New(dbStore, cfg.CacheDir, git.NewClient(cfg.GitBin))
 	server := &Server{
 		mux:     http.NewServeMux(),
 		store:   dbStore,
