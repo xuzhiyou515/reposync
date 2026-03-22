@@ -31,6 +31,7 @@ $ReleaseBackendDir = Join-Path $ReleaseDir "backend"
 $ReleaseFrontendDir = Join-Path $ReleaseDir "frontend"
 $ReleaseConfigDir = Join-Path $ReleaseDir "config"
 $ReleaseDataDir = Join-Path $ReleaseDir "data"
+$EmbeddedFrontendDir = Join-Path $BackendDir "internal\app\embedded"
 
 Write-Host "Building frontend..."
 Push-Location $FrontendDir
@@ -50,9 +51,26 @@ New-Item -ItemType Directory -Force -Path $ReleaseFrontendDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseConfigDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDataDir | Out-Null
 
-Push-Location $BackendDir
-Invoke-NativeCommand "go.exe" @("build", "-o", (Join-Path $ReleaseBackendDir "reposync.exe"), "./cmd/server")
-Pop-Location
+Write-Host "Embedding frontend assets into backend binary..."
+$EmbeddedBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("reposync-embedded-backup-" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $EmbeddedBackupDir | Out-Null
+Copy-Item -Force (Join-Path $EmbeddedFrontendDir "*") $EmbeddedBackupDir
+Remove-Item -Recurse -Force (Join-Path $EmbeddedFrontendDir "*")
+Copy-Item -Recurse -Force (Join-Path $FrontendDir "dist\*") $EmbeddedFrontendDir
+
+$pushedBackend = $false
+try {
+  Push-Location $BackendDir
+  $pushedBackend = $true
+  Invoke-NativeCommand "go.exe" @("build", "-o", (Join-Path $ReleaseBackendDir "reposync.exe"), "./cmd/server")
+} finally {
+  if ($pushedBackend) {
+    Pop-Location
+  }
+  Remove-Item -Recurse -Force (Join-Path $EmbeddedFrontendDir "*")
+  Copy-Item -Recurse -Force (Join-Path $EmbeddedBackupDir "*") $EmbeddedFrontendDir
+  Remove-Item -Recurse -Force $EmbeddedBackupDir
+}
 
 Copy-Item -Recurse -Force (Join-Path $FrontendDir "dist") $ReleaseFrontendDir
 Copy-Item -Force (Join-Path $RepoRoot "scripts\reposync.env.example") (Join-Path $ReleaseConfigDir "reposync.env.example")

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -107,6 +108,10 @@ func (s *Server) routes() {
 		}
 		if _, err := os.Stat(filepath.Join(distDir, "index.html")); err == nil {
 			http.FileServer(http.Dir(distDir)).ServeHTTP(w, r)
+			return
+		}
+		if embedded, err := fs.Sub(embeddedFrontend, "embedded"); err == nil {
+			http.FileServer(http.FS(embedded)).ServeHTTP(w, r)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"message": "RepoSync API is running"})

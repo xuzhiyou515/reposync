@@ -8,7 +8,17 @@
 
 如果需要通过 SSH 同步私有仓库，部署机还需要具备基础 `ssh` 能力。
 
-## 2. 环境变量
+## 2. 前端静态资源加载策略
+
+- 发布构建时会把前端 `dist/` 内嵌进后端二进制
+- 运行时如果 `REPOSYNC_FRONTEND_DIST` 指向的目录存在且包含 `index.html`，则优先使用外部目录
+- 否则自动回退到程序内嵌的前端资源
+
+这意味着：
+- 单文件发布时，后端程序本身已经能提供前端页面
+- 如果你希望独立替换前端，也可以继续提供外部 `dist/` 目录覆盖
+
+## 3. 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -25,7 +35,7 @@
 - `REPOSYNC_CACHE_DIR`
 - `REPOSYNC_FRONTEND_DIST`
 
-## 3. 本地构建发布包
+## 4. 本地构建发布包
 
 ### Windows PowerShell
 
@@ -56,7 +66,7 @@ release/
   DEPLOYMENT.md
 ```
 
-## 4. 启动发布包
+## 5. 启动发布包
 
 先复制环境变量模板：
 
@@ -94,7 +104,9 @@ chmod +x ./release/run.sh
 - `REPOSYNC_DB_PATH=./data/reposync.db`
 - `REPOSYNC_CACHE_DIR=./data/cache`
 
-## 5. 反向代理建议
+如果你删除 `release/frontend/dist`，程序仍然可以使用二进制内嵌的前端页面启动。
+
+## 6. 反向代理建议
 
 RepoSync 自身会同时提供 API 和前端页面，最简单的部署方式是直接暴露应用端口。
 
@@ -103,7 +115,7 @@ RepoSync 自身会同时提供 API 和前端页面，最简单的部署方式是
 - 保留 `/api/executions/:id/ws` 的 WebSocket Upgrade 头
 - 不要拦截 `/api/executions/:id/stream` 的 SSE 长连接
 
-## 6. 升级建议
+## 7. 升级建议
 
 升级时建议保留并备份：
 - `data/reposync.db`

@@ -195,6 +195,25 @@ func TestHandleExecutionWebSocketWritesEvent(t *testing.T) {
 	}
 }
 
+func TestServeEmbeddedFrontendWhenExternalDistMissing(t *testing.T) {
+	server := &Server{
+		mux:             http.NewServeMux(),
+		frontendDistDir: filepath.Join(t.TempDir(), "missing-dist"),
+	}
+	server.routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	server.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "RepoSync frontend assets are not bundled") {
+		t.Fatalf("expected embedded frontend response, got %q", rec.Body.String())
+	}
+}
+
 func TestHandleSchedulesReturnsRegisteredStatus(t *testing.T) {
 	db := filepathJoinTemp(t, "reposync.db")
 	box := security.NewSecretBox("test-secret")
