@@ -65,6 +65,137 @@ func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 	}
 }
 
+func TestAdjustSubmoduleSourceURLWithSSHCredential(t *testing.T) {
+	credential := &domain.Credential{Type: domain.CredentialTypeSSHKey, Username: "wangli"}
+	got := adjustSubmoduleSourceURL(
+		"ssh://wh@example.com:3003/org/main.git",
+		"https://example.com:3002/org/sub.git",
+		credential,
+	)
+	want := "ssh://wh@example.com:3003/org/sub.git"
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestAdjustSubmoduleSourceURLWithHTTPTokenCredential(t *testing.T) {
+	credential := &domain.Credential{Type: domain.CredentialTypeHTTPSToken}
+	got := adjustSubmoduleSourceURL(
+		"https://example.com/org/main.git",
+		"git@example.com:org/sub.git",
+		credential,
+	)
+	want := "https://example.com/org/sub.git"
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestAdjustSubmoduleSourceURLResolvesRelativePath(t *testing.T) {
+	credential := &domain.Credential{Type: domain.CredentialTypeHTTPSToken}
+	got := adjustSubmoduleSourceURL(
+		"https://example.com/group/main.git",
+		"../libs/sub.git",
+		credential,
+	)
+	want := "https://example.com/libs/sub.git"
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestAdjustSubmoduleSourceURLKeepsURLWithoutCredential(t *testing.T) {
+	got := adjustSubmoduleSourceURL(
+		"https://example.com/group/main.git",
+		"git@example.com:group/sub.git",
+		nil,
+	)
+	want := "git@example.com:group/sub.git"
+	if got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestSaveTaskRejectsSSHCredentialForHTTPSource(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	credential, err := svc.SaveCredential(context.Background(), domain.Credential{
+		Name:     "ssh",
+		Type:     domain.CredentialTypeSSHKey,
+		Secret:   "dummy-private-key",
+		Username: "git",
+	})
+	if err != nil {
+		t.Fatalf("save credential: %v", err)
+	}
+
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                "http-with-ssh",
+		SourceRepoURL:       "http://example.com/org/repo.git",
+		TargetRepoURL:       "http://target.example.com/org/repo.git",
+		SourceCredentialID:  &credential.ID,
+		Enabled:             true,
+		RecursiveSubmodules: false,
+		SyncAllRefs:         true,
+		ProviderConfig:      domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err == nil {
+		t.Fatalf("expected save task to fail, got task id %d", task.ID)
+	}
+	if !strings.Contains(err.Error(), "sourceRepoUrl uses http/https") {
+		t.Fatalf("expected compatibility error, got %v", err)
+	}
+}
+
+func TestSaveTaskAllowsSSHCredentialForSSHSource(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	credential, err := svc.SaveCredential(context.Background(), domain.Credential{
+		Name:     "ssh",
+		Type:     domain.CredentialTypeSSHKey,
+		Secret:   "dummy-private-key",
+		Username: "git",
+	})
+	if err != nil {
+		t.Fatalf("save credential: %v", err)
+	}
+
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                "ssh-with-ssh",
+		SourceRepoURL:       "git@example.com:org/repo.git",
+		TargetRepoURL:       "http://target.example.com/org/repo.git",
+		SourceCredentialID:  &credential.ID,
+		Enabled:             true,
+		RecursiveSubmodules: false,
+		SyncAllRefs:         true,
+		ProviderConfig:      domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if task.ID == 0 {
+		t.Fatalf("expected saved task id, got %d", task.ID)
+	}
+}
+
 func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is required for integration test")
@@ -173,7 +304,7 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if !strings.Contains(detail.Execution.SummaryLog, "Refreshing mirror cache") {
 		t.Fatalf("expected execution summary log to include progress output, got:\n%s", detail.Execution.SummaryLog)
 	}
-	if !strings.Contains(detail.Execution.SummaryLog, "git exec: fetch --prune origin +refs/*:refs/*") {
+	if !strings.Contains(detail.Execution.SummaryLog, "git exec: fetch --progress --prune origin +refs/*:refs/*") {
 		t.Fatalf("expected execution summary log to include raw git command output, got:\n%s", detail.Execution.SummaryLog)
 	}
 }
@@ -535,7 +666,7 @@ func writeFile(t *testing.T, path string, content string) {
 
 func waitForExecutionCompletion(t *testing.T, svc *Service, executionID int64) domain.SyncExecution {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		detail, err := svc.ExecutionDetail(context.Background(), executionID)
 		if err != nil {

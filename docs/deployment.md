@@ -50,6 +50,15 @@ chmod +x ./scripts/build-release.sh
 ./scripts/build-release.sh
 ```
 
+构建脚本采用“覆盖更新”策略，不会删除整个 `release/` 目录：
+- 会覆盖 `release/backend/` 和 `release/frontend/dist/`
+- 会更新 `release/run.ps1`、`release/run.sh`、`release/windows-service.ps1`、`release/DEPLOYMENT.md`
+- 会更新 `release/config/reposync.env.example`
+- 会保留 `release/data/` 下已有数据
+- 会保留 `release/config/reposync.env`（你自己维护的运行配置）
+
+这意味着在同一台机器反复构建 release 包时，不会因为脚本重建而清空历史数据库或缓存目录。
+
 构建完成后会生成：
 
 ```text

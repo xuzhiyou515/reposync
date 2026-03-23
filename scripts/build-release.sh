@@ -16,8 +16,10 @@ node "$FRONTEND_DIR/node_modules/vite/bin/vite.js" build
 popd >/dev/null
 
 echo "Building backend..."
-rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR/backend" "$RELEASE_DIR/frontend" "$RELEASE_DIR/config" "$RELEASE_DIR/data"
+rm -rf "$RELEASE_DIR/backend"/*
+mkdir -p "$RELEASE_DIR/frontend/dist"
+rm -rf "$RELEASE_DIR/frontend/dist"/*
 
 echo "Embedding frontend assets into backend binary..."
 EMBEDDED_BACKUP_DIR="$(mktemp -d)"
@@ -39,10 +41,11 @@ popd >/dev/null
 trap - EXIT
 cleanup
 
-cp -R "$FRONTEND_DIR/dist" "$RELEASE_DIR/frontend/dist"
+cp -R "$FRONTEND_DIR/dist/." "$RELEASE_DIR/frontend/dist/"
 cp "$REPO_ROOT/scripts/reposync.env.example" "$RELEASE_DIR/config/reposync.env.example"
 cp "$REPO_ROOT/scripts/run-release.ps1" "$RELEASE_DIR/run.ps1"
 cp "$REPO_ROOT/scripts/run-release.sh" "$RELEASE_DIR/run.sh"
+cp "$REPO_ROOT/scripts/manage-windows-service.ps1" "$RELEASE_DIR/windows-service.ps1"
 cp "$REPO_ROOT/docs/deployment.md" "$RELEASE_DIR/DEPLOYMENT.md"
 
 echo "Release bundle created at $RELEASE_DIR"

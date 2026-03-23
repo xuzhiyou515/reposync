@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -67,10 +66,19 @@ func (c *Client) EnsureMirror(ctx context.Context, sourceURL string, cachePath s
 	defer cleanup()
 
 	if !cacheHit {
+		if info, statErr := os.Stat(cachePath); statErr == nil && info.IsDir() {
+			// Recover from half-created/broken cache dirs left by interrupted runs.
+			if c.logf != nil {
+				c.logf("cache recovery: removing non-mirror cache dir %s", cachePath)
+			}
+			if err := os.RemoveAll(cachePath); err != nil {
+				return false, 0, err
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 			return false, 0, err
 		}
-		if _, err := c.runWithEnv(ctx, "", env, "clone", "--mirror", authURL, cachePath); err != nil {
+		if _, err := c.runWithEnv(ctx, "", env, "clone", "--mirror", "--progress", authURL, cachePath); err != nil {
 			return false, 0, err
 		}
 		if authURL != sourceURL {
@@ -84,7 +92,7 @@ func (c *Client) EnsureMirror(ctx context.Context, sourceURL string, cachePath s
 	if _, err := c.run(ctx, cachePath, "remote", "set-url", "origin", authURL); err != nil {
 		return true, 0, err
 	}
-	if _, err := c.runWithEnv(ctx, cachePath, env, "fetch", "--prune", "origin", "+refs/*:refs/*"); err != nil {
+	if _, err := c.runWithEnv(ctx, cachePath, env, "fetch", "--progress", "--prune", "origin", "+refs/*:refs/*"); err != nil {
 		return true, 0, err
 	}
 	if authURL != sourceURL {
@@ -108,7 +116,7 @@ func (c *Client) MirrorPush(ctx context.Context, cachePath string, targetURL str
 	if _, err := c.run(ctx, cachePath, "remote", "add", "reposync-target", authURL); err != nil {
 		return 0, err
 	}
-	if _, err := c.runWithEnv(ctx, cachePath, env, "push", "--mirror", "reposync-target"); err != nil {
+	if _, err := c.runWithEnv(ctx, cachePath, env, pushArgs("reposync-target")...); err != nil {
 		return 0, err
 	}
 	if _, err := c.run(ctx, cachePath, "remote", "remove", "reposync-target"); err != nil && !strings.Contains(err.Error(), "No such remote") {
@@ -227,7 +235,7 @@ func (c *Client) RewriteSubmodulesAndPushBranches(ctx context.Context, cachePath
 		}
 		targetHead := strings.TrimSpace(targetHeadOut)
 		result.SourceToTarget[sourceHead] = targetHead
-		if _, err := c.runWithEnv(ctx, tempDir, env, "push", "--force", "reposync-target", "HEAD:refs/heads/"+branch); err != nil {
+		if _, err := c.runWithEnv(ctx, tempDir, env, forcePushBranchArgs("reposync-target", branch)...); err != nil {
 			return RewriteResult{}, 0, err
 		}
 	}
@@ -244,8 +252,13 @@ func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args 
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	baseEnv := []string{
+		"GIT_TERMINAL_PROMPT=0",
+		"GCM_INTERACTIVE=never",
+	}
+	cmd.Env = append(os.Environ(), baseEnv...)
 	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
+		cmd.Env = append(cmd.Env, env...)
 	}
 	if c.logf != nil {
 		c.logf("git exec: %s", sanitizeArgs(args))
@@ -263,11 +276,31 @@ func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args 
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
+	var heartbeatDone chan struct{}
+	if c.logf != nil {
+		heartbeatDone = make(chan struct{})
+		started := time.Now()
+		go func() {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatDone:
+					return
+				case <-ticker.C:
+					c.logf("git running: %s (elapsed %s)", sanitizeArgs(args), time.Since(started).Round(time.Second))
+				}
+			}
+		}()
+	}
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go c.streamPipe(&wg, "stdout", stdoutPipe, &stdout)
 	go c.streamPipe(&wg, "stderr", stderrPipe, &stderr)
 	waitErr := cmd.Wait()
+	if heartbeatDone != nil {
+		close(heartbeatDone)
+	}
 	wg.Wait()
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -283,6 +316,24 @@ func (c *Client) runWithEnv(ctx context.Context, dir string, env []string, args 
 		c.logf("git done: %s", sanitizeArgs(args))
 	}
 	return stdout.String(), nil
+}
+
+func pushArgs(remote string) []string {
+	return []string{
+		"-c", "http.postBuffer=524288000",
+		"-c", "credential.interactive=false",
+		"-c", "http.version=HTTP/1.1",
+		"push", "--progress", "--mirror", remote,
+	}
+}
+
+func forcePushBranchArgs(remote string, branch string) []string {
+	return []string{
+		"-c", "http.postBuffer=524288000",
+		"-c", "credential.interactive=false",
+		"-c", "http.version=HTTP/1.1",
+		"push", "--progress", "--force", remote, "HEAD:refs/heads/" + branch,
+	}
 }
 
 func (c *Client) streamPipe(wg *sync.WaitGroup, stream string, pipe io.ReadCloser, out *bytes.Buffer) {
@@ -466,11 +517,12 @@ func prepareGitAuth(rawURL string, credential *domain.Credential) (string, []str
 			_ = os.Remove(keyFile.Name())
 			return rawURL, nil, nil, err
 		}
-		configTarget := "/dev/null"
-		if runtime.GOOS == "windows" {
-			configTarget = "NUL"
-		}
-		sshCommand := fmt.Sprintf(`ssh -i "%s" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -F %s`, keyFile.Name(), configTarget)
+		// Keep SSH behavior explicit and compatible with legacy Git servers that
+		// still only offer ssh-rsa host keys.
+		sshCommand := fmt.Sprintf(
+			`ssh -i "%s" -o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=1 -o StrictHostKeyChecking=no -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa`,
+			keyFile.Name(),
+		)
 		return rawURL, []string{"GIT_SSH_COMMAND=" + sshCommand}, func() { _ = os.Remove(keyFile.Name()) }, nil
 	default:
 		return rawURL, nil, func() {}, nil

@@ -1,6 +1,6 @@
 # RepoSync 开发进度
 
-更新时间：2026-03-22
+更新时间：2026-03-23
 
 ## 已完成
 
@@ -124,3 +124,26 @@
 - 首版 SVN 认证范围限定为 `HTTP / HTTPS`
 - 执行实现基于 `git svn`
 - 计划支持可选 `authors.txt`、真实 Git tag 映射和手动/定时触发
+
+## 2026-03-23 增量更新
+
+### 凭据与任务配置防错
+- 保存任务时新增源仓库凭据类型校验：`sourceRepoUrl` 为 `http/https` 时，不允许绑定 `ssh_key` 源凭据
+- 管理台“保存任务”新增错误提示，后端返回 4xx 时会明确展示失败原因，不再出现“点击无反应”
+
+### Git/SSH 执行稳定性
+- 调整 SSH 注入参数，移除 `-F NUL`，避免部分 Windows 环境报 `Can't open user config file NUL`
+- 兼容仅提供 `ssh-rsa` host key 的旧服务端
+- SSH 命令改为非交互并增加连接超时，避免长时间挂起
+- 所有 git 命令默认注入 `GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=never`
+- push 增加 HTTP 稳定参数（`http.postBuffer`、`http.version=HTTP/1.1`、禁用交互凭据）
+- clone/fetch/push 增加 `--progress`，并新增执行心跳日志（定时输出 elapsed）
+
+### 递归子模块同步适配
+- 子模块源 URL 会按主模块源凭据类型进行协议适配（SSH/HTTP）
+- 支持基于主模块 URL 解析子模块相对路径 URL
+- 子模块转 SSH 时继承主模块 SSH 的 host/port 与用户名，避免端口和账号不一致
+
+### 缓存自愈与发布脚本
+- 镜像缓存目录存在但不是有效 mirror 仓库时，执行前自动清理并重建，避免 `already exists and is not an empty directory`
+- `build-release.ps1/.sh` 改为覆盖更新策略，不再删除整个 `release/`，保留 `release/data` 和 `release/config/reposync.env`

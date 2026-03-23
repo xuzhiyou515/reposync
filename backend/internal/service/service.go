@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"path"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,7 +36,37 @@ func New(db *store.Store, cacheDir string, gitClient *git.Client, scmManager *sc
 }
 
 func (s *Service) SaveTask(ctx context.Context, task domain.SyncTask) (domain.SyncTask, error) {
+	if err := s.validateTaskCredentialCompatibility(ctx, task); err != nil {
+		return domain.SyncTask{}, err
+	}
 	return s.store.SaveTask(ctx, task)
+}
+
+func (s *Service) validateTaskCredentialCompatibility(ctx context.Context, task domain.SyncTask) error {
+	if !isHTTPRepoURL(task.SourceRepoURL) || task.SourceCredentialID == nil {
+		return nil
+	}
+	sourceCredential, err := s.store.CredentialByOptionalID(ctx, task.SourceCredentialID)
+	if err != nil {
+		return err
+	}
+	if sourceCredential != nil && sourceCredential.Type == domain.CredentialTypeSSHKey {
+		return fmt.Errorf("sourceRepoUrl uses http/https, sourceCredentialId cannot reference ssh_key")
+	}
+	return nil
+}
+
+func isHTTPRepoURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {
@@ -574,9 +605,13 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		}
 		submoduleMapping := map[string]git.SubmoduleRewrite{}
 		for _, submodule := range submodules {
+			childSource := adjustSubmoduleSourceURL(sourceRepoURL, submodule.URL, currentCredentials.Source)
 			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.URL, submodule.Path)
 			logger.log(ctx, "Discovered submodule %s -> %s", submodule.Path, childTarget)
-			childResult, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, submodule.URL, childTarget, submodule.Commit, depth+1, &node.ID, submoduleCredentials, submoduleCredentials, visited, counters, logger)
+			if childSource != submodule.URL {
+				logger.log(ctx, "Adjusted submodule source URL for %s based on source credential type", submodule.Path)
+			}
+			childResult, childErr := s.syncRepository(ctx, gitClient, executionID, task, submodule.Path, childSource, childTarget, submodule.Commit, depth+1, &node.ID, submoduleCredentials, submoduleCredentials, visited, counters, logger)
 			if childErr != nil {
 				logger.log(ctx, "Submodule sync failed for %s: %v", submodule.Path, childErr)
 				node.Status = domain.ExecutionStatusFailed
@@ -656,6 +691,180 @@ func mapSubmoduleTarget(parentTarget string, submoduleURL string, submodulePath 
 		return normalizeGitTarget(replaceURLTargetRepo(parentTarget, repoName))
 	}
 	return normalizeGitTarget(replaceLocalTargetRepo(parentTarget, repoName))
+}
+
+func adjustSubmoduleSourceURL(parentSourceURL string, rawSubmoduleURL string, credential *domain.Credential) string {
+	resolved := resolveSubmoduleURL(parentSourceURL, rawSubmoduleURL)
+	if credential == nil {
+		return resolved
+	}
+	switch credential.Type {
+	case domain.CredentialTypeSSHKey:
+		if adjusted, ok := toSSHURL(resolved, credential.Username, parentSourceURL); ok {
+			return adjusted
+		}
+	case domain.CredentialTypeHTTPSToken, domain.CredentialTypeAPIToken:
+		preferredScheme := preferredHTTPScheme(parentSourceURL)
+		if adjusted, ok := toHTTPURL(resolved, preferredScheme); ok {
+			return adjusted
+		}
+	}
+	return resolved
+}
+
+func resolveSubmoduleURL(parentSourceURL string, rawSubmoduleURL string) string {
+	trimmed := strings.TrimSpace(rawSubmoduleURL)
+	if trimmed == "" {
+		return rawSubmoduleURL
+	}
+	if isSCPLikeGitURL(trimmed) {
+		return trimmed
+	}
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme != "" {
+		return trimmed
+	}
+	if !strings.HasPrefix(trimmed, "./") && !strings.HasPrefix(trimmed, "../") {
+		return trimmed
+	}
+
+	if isSCPLikeGitURL(parentSourceURL) {
+		hostPart, repoPath, ok := splitSCPLikeGitURL(parentSourceURL)
+		if !ok {
+			return trimmed
+		}
+		base := path.Dir(strings.TrimPrefix(repoPath, "/"))
+		joined := path.Clean(path.Join(base, trimmed))
+		if strings.HasPrefix(joined, "../") {
+			return trimmed
+		}
+		return hostPart + ":" + joined
+	}
+	parent, err := url.Parse(parentSourceURL)
+	if err != nil || parent.Scheme == "" {
+		return trimmed
+	}
+	base := path.Dir(parent.Path)
+	parent.Path = path.Clean(path.Join(base, trimmed))
+	return parent.String()
+}
+
+func toSSHURL(raw string, username string, parentSourceURL string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", false
+	}
+	user := strings.TrimSpace(sshUserFromParent(parentSourceURL))
+	if user == "" {
+		user = strings.TrimSpace(username)
+	}
+	if user == "" {
+		user = "git"
+	}
+	host := parsed.Host
+	if parentHost, ok := sshAuthorityFromParent(parentSourceURL); ok {
+		host = parentHost
+	}
+	if strings.TrimSpace(host) == "" || strings.TrimSpace(parsed.Path) == "" {
+		return "", false
+	}
+	return fmt.Sprintf("ssh://%s@%s%s", user, host, parsed.Path), true
+}
+
+func sshUserFromParent(parentSourceURL string) string {
+	trimmed := strings.TrimSpace(parentSourceURL)
+	if trimmed == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme == "ssh" && parsed.User != nil {
+		return strings.TrimSpace(parsed.User.Username())
+	}
+	if isSCPLikeGitURL(trimmed) {
+		hostPart, _, ok := splitSCPLikeGitURL(trimmed)
+		if !ok {
+			return ""
+		}
+		if at := strings.LastIndex(hostPart, "@"); at > 0 {
+			return strings.TrimSpace(hostPart[:at])
+		}
+	}
+	return ""
+}
+
+func sshAuthorityFromParent(parentSourceURL string) (string, bool) {
+	trimmed := strings.TrimSpace(parentSourceURL)
+	if trimmed == "" {
+		return "", false
+	}
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme == "ssh" && strings.TrimSpace(parsed.Host) != "" {
+		return parsed.Host, true
+	}
+	if isSCPLikeGitURL(trimmed) {
+		hostPart, _, ok := splitSCPLikeGitURL(trimmed)
+		if !ok {
+			return "", false
+		}
+		if at := strings.LastIndex(hostPart, "@"); at >= 0 && at+1 < len(hostPart) {
+			return hostPart[at+1:], true
+		}
+		return hostPart, true
+	}
+	return "", false
+}
+
+func toHTTPURL(raw string, preferredScheme string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	if parsed, err := url.Parse(trimmed); err == nil {
+		switch parsed.Scheme {
+		case "http", "https":
+			return trimmed, true
+		case "ssh":
+			if parsed.Host == "" || parsed.Path == "" {
+				return "", false
+			}
+			parsed.Scheme = preferredScheme
+			parsed.User = nil
+			return parsed.String(), true
+		}
+	}
+	if isSCPLikeGitURL(trimmed) {
+		hostPart, repoPath, ok := splitSCPLikeGitURL(trimmed)
+		if !ok {
+			return "", false
+		}
+		host := hostPart
+		if at := strings.LastIndex(hostPart, "@"); at >= 0 && at+1 < len(hostPart) {
+			host = hostPart[at+1:]
+		}
+		return fmt.Sprintf("%s://%s/%s", preferredScheme, host, strings.TrimPrefix(repoPath, "/")), true
+	}
+	return "", false
+}
+
+func preferredHTTPScheme(parentSourceURL string) string {
+	if parsed, err := url.Parse(parentSourceURL); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return parsed.Scheme
+	}
+	return "https"
+}
+
+func isSCPLikeGitURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	return strings.Contains(trimmed, "@") && strings.Contains(trimmed, ":") && !strings.Contains(trimmed, "://")
+}
+
+func splitSCPLikeGitURL(raw string) (string, string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	colon := strings.Index(trimmed, ":")
+	if colon <= 0 || colon+1 >= len(trimmed) {
+		return "", "", false
+	}
+	return trimmed[:colon], trimmed[colon+1:], true
 }
 
 func normalizeGitTarget(target string) string {

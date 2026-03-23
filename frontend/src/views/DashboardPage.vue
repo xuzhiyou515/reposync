@@ -447,12 +447,16 @@ const saveTask = async () => {
     ElMessage.warning('请先修正任务表单中的必填项')
     return
   }
-  await api.saveTask(taskForm)
-  ElMessage.success('任务已保存')
-  resetTaskForm()
-  taskDialogVisible.value = false
-  taskFormRef.value?.clearValidate()
-  await refreshAll()
+  try {
+    await api.saveTask(taskForm)
+    ElMessage.success('任务已保存')
+    resetTaskForm()
+    taskDialogVisible.value = false
+    taskFormRef.value?.clearValidate()
+    await refreshAll()
+  } catch (error) {
+    ElMessage.error(`保存失败：${getErrorMessage(error, '无法保存任务')}`)
+  }
 }
 
 const editTask = (task: SyncTask) => {

@@ -42,14 +42,18 @@ Invoke-NativeCommand "node.exe" @((Join-Path $FrontendDir "node_modules\vite\bin
 Pop-Location
 
 Write-Host "Building backend..."
-if (Test-Path $ReleaseDir) {
-  Remove-Item -Recurse -Force $ReleaseDir
-}
-
 New-Item -ItemType Directory -Force -Path $ReleaseBackendDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseFrontendDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseConfigDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDataDir | Out-Null
+
+if (Test-Path $ReleaseBackendDir) {
+  Remove-Item -Recurse -Force (Join-Path $ReleaseBackendDir "*")
+}
+$ReleaseFrontendDistDir = Join-Path $ReleaseFrontendDir "dist"
+if (Test-Path $ReleaseFrontendDistDir) {
+  Remove-Item -Recurse -Force (Join-Path $ReleaseFrontendDistDir "*")
+}
 
 Write-Host "Embedding frontend assets into backend binary..."
 $EmbeddedBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("reposync-embedded-backup-" + [System.Guid]::NewGuid().ToString("N"))
@@ -72,7 +76,10 @@ try {
   Remove-Item -Recurse -Force $EmbeddedBackupDir
 }
 
-Copy-Item -Recurse -Force (Join-Path $FrontendDir "dist") $ReleaseFrontendDir
+if (-not (Test-Path $ReleaseFrontendDistDir)) {
+  New-Item -ItemType Directory -Force -Path $ReleaseFrontendDistDir | Out-Null
+}
+Copy-Item -Recurse -Force (Join-Path $FrontendDir "dist\*") $ReleaseFrontendDistDir
 Copy-Item -Force (Join-Path $RepoRoot "scripts\reposync.env.example") (Join-Path $ReleaseConfigDir "reposync.env.example")
 Copy-Item -Force (Join-Path $RepoRoot "scripts\run-release.ps1") (Join-Path $ReleaseDir "run.ps1")
 Copy-Item -Force (Join-Path $RepoRoot "scripts\run-release.sh") (Join-Path $ReleaseDir "run.sh")
