@@ -1,6 +1,6 @@
 # RepoSync 开发进度
 
-更新时间：2026-03-23
+更新时间：2026-03-24
 
 ## 已完成
 
@@ -208,3 +208,16 @@
 - `git svn` execution now passes `--username` and injects the password into the authenticated source URL instead of relying on implicit prompting.
 - Added validation so SVN source credentials must include both username and password when a credential is attached.
 - Added Git client and service tests covering SVN auth argument generation and validation behavior.
+
+## 2026-03-24 Incremental Update (9)
+
+### Management UI: credential clarity
+- Reworked the credential creation dialog so credential type is chosen first, with clearer labels and type-specific guidance.
+- Editing an existing credential no longer allows changing its type; users must create a new credential when switching auth modes.
+- Removed the masked secret column from the credential list to keep the table focused on name, type, and usage.
+
+## 2026-03-24 Incremental Update (10)
+
+### Documentation refresh
+- Updated the top-level `README.md` to describe both `Git -> Git` mirror sync and `SVN -> Git` import capabilities.
+- Rewrote `docs/README.md` so it reflects the current codebase status instead of the initial scaffold phase, and fixed the broken progress document link.

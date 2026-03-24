@@ -11,18 +11,15 @@
 - [部署说明](./deployment.md)
 
 ## 当前仓库状态
-- 已初始化后端 `Go` 工程骨架：`backend/`
-- 已初始化前端 `Vue + Vite` 工程骨架：`frontend/`
-- 尚未完成核心业务实现，后续开发应以本文档为准逐步补齐
+- 后端 `Go` 服务、前端 `Vue + Vite` 管理台、SQLite 存储和发布脚本已落地。
+- 首版 `Git mirror` 路线已完成，包含自动建仓、递归子模块、调度、Webhook、实时日志和缓存管理。
+- `SVN -> Git` 正在持续补强，当前已具备任务模型、执行主链、作者映射、目标偏移保护、真实 E2E 回归夹具和基础管理台支持。
 
-## 首版目标
-- 支持多任务 Git 镜像同步
-- 支持 SSH Key / HTTPS Token / API Token
-- 支持 GitHub / Gogs Webhook 与定时触发
-- 支持递归子模块同步
-- 支持本地裸仓库镜像缓存
-- 支持目标仓库缺失时自动建仓
-- 提供单管理员使用的 Web 管理台
+## 当前能力边界
+- 支持多任务 `Git -> Git` 镜像同步。
+- 支持 `SVN -> Git` 持续导入，范围限定为标准 `trunk / branches / tags` 布局。
+- 支持 SSH 私钥、HTTP 用户名密码、平台 API Token 三类凭证。
+- 支持 GitHub / Gogs、定时调度、Webhook、执行详情、缓存管理和单管理员管理台。
 
 ## 非目标
 - 多租户
