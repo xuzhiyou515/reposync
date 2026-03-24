@@ -701,6 +701,104 @@ func TestRunTaskRewritesGitlinkToMirroredSubmoduleCommit(t *testing.T) {
 	}
 }
 
+func TestRunTaskImportsSVNRepositoryEndToEnd(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for integration test")
+	}
+
+	sourceURL := strings.TrimSpace(os.Getenv("REPOSYNC_E2E_SVN_URL"))
+	if sourceURL == "" {
+		t.Skip("set REPOSYNC_E2E_SVN_URL to run the real svn_import end-to-end regression")
+	}
+
+	root := t.TempDir()
+	targetBare := filepath.Join(root, "target.git")
+	dbPath := filepath.Join(root, "reposync.db")
+	cacheDir := filepath.Join(root, "cache")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, cacheDir, gitclient.NewClient("git"), scm.NewManager())
+
+	var sourceCredentialID *int64
+	sourceUsername := strings.TrimSpace(os.Getenv("REPOSYNC_E2E_SVN_USERNAME"))
+	sourcePassword := strings.TrimSpace(os.Getenv("REPOSYNC_E2E_SVN_PASSWORD"))
+	if sourceUsername != "" || sourcePassword != "" {
+		credential, err := svc.SaveCredential(context.Background(), domain.Credential{
+			Name:     "svn-e2e-source",
+			Type:     domain.CredentialTypeHTTPSToken,
+			Username: sourceUsername,
+			Secret:   sourcePassword,
+		})
+		if err != nil {
+			t.Fatalf("save source credential: %v", err)
+		}
+		sourceCredentialID = &credential.ID
+	}
+
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:           domain.TaskTypeSVNImport,
+		Name:               "svn-e2e",
+		SourceRepoURL:      sourceURL,
+		TargetRepoURL:      targetBare,
+		SourceCredentialID: sourceCredentialID,
+		Enabled:            true,
+		SyncAllRefs:        true,
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGitHub,
+			Visibility: domain.VisibilityPrivate,
+		},
+		SVNConfig: domain.SVNConfig{
+			AuthorDomain: strings.TrimSpace(os.Getenv("REPOSYNC_E2E_SVN_AUTHOR_DOMAIN")),
+		},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	execution, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	execution = waitForExecutionCompletion(t, svc, execution.ID)
+	if execution.Status != domain.ExecutionStatusSuccess {
+		detail, detailErr := svc.ExecutionDetail(context.Background(), execution.ID)
+		if detailErr == nil {
+			t.Fatalf("expected success, got %s\nsummary log:\n%s", execution.Status, detail.Execution.SummaryLog)
+		}
+		t.Fatalf("expected success, got %s", execution.Status)
+	}
+
+	expectedBranch := strings.TrimSpace(os.Getenv("REPOSYNC_E2E_SVN_EXPECT_BRANCH"))
+	if expectedBranch == "" {
+		expectedBranch = "trunk"
+	}
+	assertGitRef(t, targetBare, "refs/heads/"+expectedBranch)
+
+	if expectedTag := strings.TrimSpace(os.Getenv("REPOSYNC_E2E_SVN_EXPECT_TAG")); expectedTag != "" {
+		assertGitRef(t, targetBare, "refs/tags/"+expectedTag)
+	}
+
+	detail, err := svc.ExecutionDetail(context.Background(), execution.ID)
+	if err != nil {
+		t.Fatalf("execution detail: %v", err)
+	}
+	if detail.Execution.RepoCount != 1 {
+		t.Fatalf("expected 1 imported repository, got %d", detail.Execution.RepoCount)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("expected 1 execution node, got %d", len(detail.Nodes))
+	}
+	if !strings.Contains(detail.Execution.SummaryLog, "Promoting SVN refs") {
+		t.Fatalf("expected summary log to mention svn ref promotion, got:\n%s", detail.Execution.SummaryLog)
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

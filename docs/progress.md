@@ -194,3 +194,9 @@
 ### Phase 7: execution observability
 - Enhanced execution detail UI so `svn_import` runs now surface task type, SVN layout, and author mapping mode directly in the management console.
 - Added a dedicated execution configuration panel so operators can inspect the source/target pair, cache location, and task-specific sync settings without reading raw logs.
+
+## 2026-03-24 Incremental Update (7)
+
+### Phase 7: real end-to-end regression harness
+- Added an opt-in `svn_import` end-to-end integration test in the service layer that runs against a real HTTP/HTTPS SVN repository when `REPOSYNC_E2E_SVN_*` environment variables are provided.
+- The harness covers the full flow from `svn_import` task execution to target Git repository verification, while still skipping cleanly in environments that do not provide external SVN fixtures.
