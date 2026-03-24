@@ -26,11 +26,11 @@ func TestBuildCacheKeyStable(t *testing.T) {
 
 func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 	cases := []struct {
-		name         string
-		parentTarget string
-		submoduleURL string
+		name          string
+		parentTarget  string
+		submoduleURL  string
 		submodulePath string
-		expected     string
+		expected      string
 	}{
 		{
 			name:          "local bare path",
@@ -193,6 +193,72 @@ func TestSaveTaskAllowsSSHCredentialForSSHSource(t *testing.T) {
 	}
 	if task.ID == 0 {
 		t.Fatalf("expected saved task id, got %d", task.ID)
+	}
+}
+
+func TestSaveTaskRejectsWebhookForSVNImport(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	_, err = svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-with-webhook",
+		SourceRepoURL: "https://svn.example.com/repos/project",
+		TargetRepoURL: "https://target.example.com/org/repo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		TriggerConfig: domain.TriggerConfig{
+			EnableWebhook: true,
+		},
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err == nil {
+		t.Fatal("expected save task to fail for svn webhook")
+	}
+	if !strings.Contains(err.Error(), "does not support webhook") {
+		t.Fatalf("expected webhook validation error, got %v", err)
+	}
+}
+
+func TestRunTaskRejectsSVNImportUntilExecutorIsImplemented(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:       domain.TaskTypeSVNImport,
+		Name:           "svn-import",
+		SourceRepoURL:  "https://svn.example.com/repos/project",
+		TargetRepoURL:  "https://target.example.com/org/repo.git",
+		Enabled:        true,
+		SyncAllRefs:    true,
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	_, err = svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err == nil {
+		t.Fatal("expected svn import run to be rejected")
+	}
+	if !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("expected not implemented error, got %v", err)
 	}
 }
 

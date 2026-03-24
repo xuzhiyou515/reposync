@@ -7,9 +7,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
-	"path"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -36,14 +36,46 @@ func New(db *store.Store, cacheDir string, gitClient *git.Client, scmManager *sc
 }
 
 func (s *Service) SaveTask(ctx context.Context, task domain.SyncTask) (domain.SyncTask, error) {
-	if err := s.validateTaskCredentialCompatibility(ctx, task); err != nil {
+	task = normalizeTask(task)
+	if err := s.validateTask(ctx, task); err != nil {
 		return domain.SyncTask{}, err
 	}
 	return s.store.SaveTask(ctx, task)
 }
 
-func (s *Service) validateTaskCredentialCompatibility(ctx context.Context, task domain.SyncTask) error {
-	if !isHTTPRepoURL(task.SourceRepoURL) || task.SourceCredentialID == nil {
+func normalizeTask(task domain.SyncTask) domain.SyncTask {
+	if task.TaskType == "" {
+		task.TaskType = domain.TaskTypeGitMirror
+	}
+	if task.TaskType == domain.TaskTypeSVNImport {
+		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
+			task.SVNConfig.TrunkPath = "trunk"
+		}
+		if strings.TrimSpace(task.SVNConfig.BranchesPath) == "" {
+			task.SVNConfig.BranchesPath = "branches"
+		}
+		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
+			task.SVNConfig.TagsPath = "tags"
+		}
+	}
+	return task
+}
+
+func (s *Service) validateTask(ctx context.Context, task domain.SyncTask) error {
+	if task.TaskType != domain.TaskTypeGitMirror && task.TaskType != domain.TaskTypeSVNImport {
+		return fmt.Errorf("unsupported taskType %q", task.TaskType)
+	}
+	if task.TaskType == domain.TaskTypeSVNImport {
+		if !isHTTPRepoURL(task.SourceRepoURL) {
+			return fmt.Errorf("svn_import sourceRepoUrl must use http/https")
+		}
+		if task.RecursiveSubmodules {
+			return fmt.Errorf("svn_import does not support recursiveSubmodules")
+		}
+		if task.TriggerConfig.EnableWebhook {
+			return fmt.Errorf("svn_import does not support webhook trigger")
+		}
+	} else if task.SourceCredentialID == nil || !isHTTPRepoURL(task.SourceRepoURL) {
 		return nil
 	}
 	sourceCredential, err := s.store.CredentialByOptionalID(ctx, task.SourceCredentialID)
@@ -51,6 +83,9 @@ func (s *Service) validateTaskCredentialCompatibility(ctx context.Context, task 
 		return err
 	}
 	if sourceCredential != nil && sourceCredential.Type == domain.CredentialTypeSSHKey {
+		if task.TaskType == domain.TaskTypeSVNImport {
+			return fmt.Errorf("svn_import sourceCredentialId cannot reference ssh_key")
+		}
 		return fmt.Errorf("sourceRepoUrl uses http/https, sourceCredentialId cannot reference ssh_key")
 	}
 	return nil
@@ -358,6 +393,10 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 	if !task.Enabled {
 		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, fmt.Errorf("task is disabled")
+	}
+	if task.TaskType == domain.TaskTypeSVNImport {
+		s.clearTaskRunning(taskID)
+		return domain.SyncExecution{}, fmt.Errorf("svn_import execution is not implemented yet")
 	}
 	sourceCredential, err := s.store.CredentialByOptionalID(ctx, task.SourceCredentialID)
 	if err != nil && err != sql.ErrNoRows {

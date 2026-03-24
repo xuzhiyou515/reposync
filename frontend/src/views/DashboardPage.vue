@@ -5,7 +5,7 @@ import { ElMessage } from 'element-plus'
 import type { ElTree } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '../api'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, WebhookEvent } from '../types'
+import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, TaskType, WebhookEvent } from '../types'
 
 const tasks = ref<SyncTask[]>([])
 const credentials = ref<Credential[]>([])
@@ -44,6 +44,7 @@ const workspaceScrollTop = reactive<Record<WorkspaceTab, number>>({
 
 const emptyTask = (): Partial<SyncTask> => ({
   id: undefined,
+  taskType: 'git_mirror',
   name: '',
   sourceRepoUrl: '',
   targetRepoUrl: '',
@@ -69,6 +70,12 @@ const emptyTask = (): Partial<SyncTask> => ({
     descriptionTemplate: 'mirror for {{repo}}',
     baseApiUrl: '',
   },
+  svnConfig: {
+    trunkPath: 'trunk',
+    branchesPath: 'branches',
+    tagsPath: 'tags',
+    authorsFilePath: '',
+  },
 })
 
 const emptyCredential = (): Partial<Credential> => ({
@@ -82,6 +89,11 @@ const emptyCredential = (): Partial<Credential> => ({
 
 const taskForm = reactive<Partial<SyncTask>>(emptyTask())
 const credentialForm = reactive<Partial<Credential>>(emptyCredential())
+const taskTypeOptions: Array<{ label: string; value: TaskType }> = [
+  { label: 'Git Mirror', value: 'git_mirror' },
+  { label: 'SVN Import', value: 'svn_import' },
+]
+const taskFormIsSVNImport = computed(() => taskForm.taskType === 'svn_import')
 
 const repositoryValueValidator = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   const trimmed = value?.trim()
@@ -146,6 +158,7 @@ const taskSummary = computed(() => ({
   recursive: tasks.value.filter((item) => item.recursiveSubmodules).length,
   scheduled: tasks.value.filter((item) => item.triggerConfig.enableSchedule).length,
   running: tasks.value.filter((item) => item.lastExecutionStatus === 'running').length,
+  svnImports: tasks.value.filter((item) => item.taskType === 'svn_import').length,
 }))
 
 const taskDialogTitle = computed(() => (taskForm.id ? '编辑任务' : '新增任务'))
@@ -160,6 +173,10 @@ const executionHistoryTitle = computed(() => {
 
 const taskFormTriggerCards = computed(() => [
   {
+    label: '任务类型',
+    value: taskFormIsSVNImport.value ? 'SVN Import' : 'Git Mirror',
+  },
+  {
     label: '定时计划',
     value: taskForm.triggerConfig?.enableSchedule ? taskForm.triggerConfig.cron || '已启用' : '未启用',
   },
@@ -172,16 +189,23 @@ const taskFormTriggerCards = computed(() => [
     value: taskForm.triggerConfig?.branchReference || '未限制',
   },
   {
-    label: '镜像范围',
-    value: taskForm.syncAllRefs ? '全部 refs' : '自定义',
+    label: taskFormIsSVNImport.value ? 'SVN 布局' : '镜像范围',
+    value: taskFormIsSVNImport.value
+      ? `${taskForm.svnConfig?.trunkPath || 'trunk'} / ${taskForm.svnConfig?.branchesPath || 'branches'} / ${taskForm.svnConfig?.tagsPath || 'tags'}`
+      : taskForm.syncAllRefs ? '全部 refs' : '自定义',
   },
 ])
 
 const taskFormWebhookPreview = computed(() => {
+  if (taskFormIsSVNImport.value) {
+    return 'SVN Import 不支持 Webhook'
+  }
   const provider = taskForm.providerConfig?.provider || 'github'
   const taskId = taskForm.id ?? ':taskId'
   return `/api/webhooks/${provider}/${taskId}`
 })
+
+const taskTypeLabel = (task: Pick<SyncTask, 'taskType'>) => task.taskType === 'svn_import' ? 'SVN Import' : 'Git Mirror'
 
 type ExecutionTreeNode = SyncExecutionNode & {
   label: string
@@ -460,7 +484,15 @@ const saveTask = async () => {
 }
 
 const editTask = (task: SyncTask) => {
+  resetTaskForm()
   Object.assign(taskForm, JSON.parse(JSON.stringify(task)))
+  taskForm.taskType = taskForm.taskType || 'git_mirror'
+  taskForm.svnConfig = {
+    trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
+    branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
+    tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
+    authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
+  }
   taskDialogVisible.value = true
   void nextTick(() => taskFormRef.value?.clearValidate())
 }
@@ -517,6 +549,30 @@ watch(activeWorkspaceTab, async (nextTab, previousTab) => {
   await nextTick()
   window.scrollTo({ top: workspaceScrollTop[nextTab] ?? 0, behavior: 'auto' })
 })
+
+watch(
+  () => taskForm.taskType,
+  (taskType) => {
+    if (taskType === 'svn_import') {
+      taskForm.recursiveSubmodules = false
+      taskForm.triggerConfig!.enableWebhook = false
+      taskForm.syncAllRefs = true
+      taskForm.svnConfig = {
+        trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
+        branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
+        tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
+        authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
+      }
+      return
+    }
+    taskForm.svnConfig = {
+      trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
+      branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
+      tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
+      authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
+    }
+  },
+)
 
 const runTask = async (task: SyncTask) => {
   runningTaskId.value = task.id
@@ -884,6 +940,10 @@ onBeforeUnmount(() => {
           <strong>{{ taskSummary.running }}</strong>
           <span>正在执行</span>
         </div>
+        <div class="stat-card">
+          <strong>{{ taskSummary.svnImports }}</strong>
+          <span>SVN 导入</span>
+        </div>
       </div>
     </section>
 
@@ -903,10 +963,17 @@ onBeforeUnmount(() => {
               </template>
               <el-table :data="tasks" height="620">
                 <el-table-column prop="name" label="任务" min-width="220" />
+                <el-table-column label="类型" width="120">
+                  <template #default="{ row }">
+                    <el-tag :type="row.taskType === 'svn_import' ? 'warning' : 'success'">
+                      {{ taskTypeLabel(row) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
                 <el-table-column label="同步" width="130">
                   <template #default="{ row }">
-                    <el-tag :type="row.recursiveSubmodules ? 'success' : 'info'">
-                      {{ row.recursiveSubmodules ? '递归子模块' : '单仓库' }}
+                    <el-tag :type="row.taskType === 'svn_import' ? 'warning' : row.recursiveSubmodules ? 'success' : 'info'">
+                      {{ row.taskType === 'svn_import' ? 'SVN 标准布局' : row.recursiveSubmodules ? '递归子模块' : '单仓库' }}
                     </el-tag>
                   </template>
                 </el-table-column>
@@ -1258,9 +1325,15 @@ onBeforeUnmount(() => {
             <el-form-item label="任务名称" prop="name">
               <el-input v-model="taskForm.name" />
             </el-form-item>
+            <el-form-item label="任务类型">
+              <el-segmented v-model="taskForm.taskType" :options="taskTypeOptions" />
+            </el-form-item>
             <div class="two-column form-grid-wide">
               <el-form-item label="源仓库 URL" prop="sourceRepoUrl">
-                <el-input v-model="taskForm.sourceRepoUrl" placeholder="git@github.com:org/repo.git" />
+                <el-input
+                  v-model="taskForm.sourceRepoUrl"
+                  :placeholder="taskFormIsSVNImport ? 'https://svn.example.com/repos/project' : 'git@github.com:org/repo.git'"
+                />
               </el-form-item>
               <el-form-item label="目标仓库 URL" prop="targetRepoUrl">
                 <el-input v-model="taskForm.targetRepoUrl" placeholder="git@gogs.example.com:mirror/repo.git" />
@@ -1272,10 +1345,35 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
+        <section v-if="taskFormIsSVNImport" class="form-section">
+          <div class="form-section-header">
+            <strong>SVN 导入配置</strong>
+            <span>当前只支持标准 `trunk / branches / tags` 布局，后续执行器会直接复用这些路径。</span>
+          </div>
+          <div class="form-section-body">
+            <div class="two-column form-grid-wide">
+              <el-form-item label="Trunk 路径">
+                <el-input v-model="taskForm.svnConfig!.trunkPath" />
+              </el-form-item>
+              <el-form-item label="Branches 路径">
+                <el-input v-model="taskForm.svnConfig!.branchesPath" />
+              </el-form-item>
+            </div>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="Tags 路径">
+                <el-input v-model="taskForm.svnConfig!.tagsPath" />
+              </el-form-item>
+              <el-form-item label="authors.txt 文件">
+                <el-input v-model="taskForm.svnConfig!.authorsFilePath" placeholder="可选，本地文件路径" />
+              </el-form-item>
+            </div>
+          </div>
+        </section>
+
         <section class="form-section">
           <div class="form-section-header">
             <strong>凭证配置</strong>
-            <span>分别控制主仓库、子模块和平台 API 的访问凭证。</span>
+            <span>{{ taskFormIsSVNImport ? 'SVN 源和目标 Git/平台访问凭证。' : '分别控制主仓库、子模块和平台 API 的访问凭证。' }}</span>
           </div>
           <div class="form-section-body">
             <div class="two-column form-grid-wide">
@@ -1290,7 +1388,7 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
             </div>
-            <div class="two-column form-grid-wide">
+            <div v-if="!taskFormIsSVNImport" class="two-column form-grid-wide">
               <el-form-item label="子模块源凭证">
                 <el-select v-model="taskForm.submoduleSourceCredentialId" clearable>
                   <el-option v-for="item in credentials" :key="`sub-src-${item.id}`" :label="item.name" :value="item.id" />
@@ -1311,7 +1409,7 @@ onBeforeUnmount(() => {
                 </el-select>
                 <div class="field-help">用于自动建仓、检查仓库存在性等平台 API 调用。</div>
               </el-form-item>
-              <el-form-item label="子模块目标平台 API 凭证">
+              <el-form-item v-if="!taskFormIsSVNImport" label="子模块目标平台 API 凭证">
                 <el-select v-model="taskForm.submoduleTargetApiCredentialId" clearable>
                   <el-option v-for="item in credentials" :key="`sub-api-${item.id}`" :label="item.name" :value="item.id" />
                 </el-select>
@@ -1363,20 +1461,20 @@ onBeforeUnmount(() => {
           <div class="form-section-body">
             <div class="flag-row">
               <el-switch v-model="taskForm.enabled" active-text="启用任务" />
-              <el-switch v-model="taskForm.recursiveSubmodules" active-text="递归子模块" />
+              <el-switch v-if="!taskFormIsSVNImport" v-model="taskForm.recursiveSubmodules" active-text="递归子模块" />
               <el-switch v-model="taskForm.syncAllRefs" active-text="镜像全部 refs" />
               <el-switch v-model="taskForm.triggerConfig!.enableSchedule" active-text="启用定时" />
-              <el-switch v-model="taskForm.triggerConfig!.enableWebhook" active-text="启用 Webhook" />
+              <el-switch v-if="!taskFormIsSVNImport" v-model="taskForm.triggerConfig!.enableWebhook" active-text="启用 Webhook" />
             </div>
             <div class="two-column form-grid-wide">
               <el-form-item label="Cron" prop="triggerConfig.cron">
                 <el-input v-model="taskForm.triggerConfig!.cron" />
               </el-form-item>
-              <el-form-item label="Branch Reference">
+              <el-form-item :label="taskFormIsSVNImport ? '导入分支标识' : 'Branch Reference'">
                 <el-input v-model="taskForm.triggerConfig!.branchReference" />
               </el-form-item>
             </div>
-            <el-form-item label="Webhook Secret" prop="triggerConfig.webhookSecret">
+            <el-form-item v-if="!taskFormIsSVNImport" label="Webhook Secret" prop="triggerConfig.webhookSecret">
               <el-input v-model="taskForm.triggerConfig!.webhookSecret" />
             </el-form-item>
             <div class="task-trigger-preview">

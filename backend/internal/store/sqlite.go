@@ -66,6 +66,7 @@ func (s *Store) init() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS sync_tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_type TEXT NOT NULL DEFAULT 'git_mirror',
   name TEXT NOT NULL,
   source_repo_url TEXT NOT NULL,
   target_repo_url TEXT NOT NULL,
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS sync_tasks (
   sync_all_refs INTEGER NOT NULL,
   trigger_config TEXT NOT NULL,
   provider_config TEXT NOT NULL,
+  svn_config TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -171,6 +173,14 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
+	_, err = s.db.Exec(`ALTER TABLE sync_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'git_mirror'`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE sync_tasks ADD COLUMN svn_config TEXT NOT NULL DEFAULT '{}'`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
 	return nil
 }
 
@@ -219,7 +229,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	var targetAPICredential sql.NullInt64
 	var submoduleTargetAPICredential sql.NullInt64
 	var enabled, recursive, syncAll int
-	var triggerJSON, providerJSON string
+	var taskType, triggerJSON, providerJSON, svnConfigJSON string
 	var createdAt, updatedAt string
 	var lastExecutionID sql.NullInt64
 	var lastStatus string
@@ -229,19 +239,19 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 
 	if withLatest {
 		err = row.Scan(
-			&task.ID, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
+			&task.ID, &taskType, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
 			&srcCredential, &submoduleSrcCredential, &targetCredential, &submoduleTargetCredential, &targetAPICredential, &submoduleTargetAPICredential,
 			&enabled, &recursive, &syncAll,
-			&triggerJSON, &providerJSON,
+			&triggerJSON, &providerJSON, &svnConfigJSON,
 			&createdAt, &updatedAt,
 			&lastExecutionID, &lastStatus, &lastStarted, &lastRepoCount, &lastCreatedCount,
 		)
 	} else {
 		err = row.Scan(
-			&task.ID, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
+			&task.ID, &taskType, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
 			&srcCredential, &submoduleSrcCredential, &targetCredential, &submoduleTargetCredential, &targetAPICredential, &submoduleTargetAPICredential,
 			&enabled, &recursive, &syncAll,
-			&triggerJSON, &providerJSON,
+			&triggerJSON, &providerJSON, &svnConfigJSON,
 			&createdAt, &updatedAt,
 		)
 	}
@@ -270,10 +280,26 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	task.Enabled = enabled == 1
 	task.RecursiveSubmodules = recursive == 1
 	task.SyncAllRefs = syncAll == 1
+	task.TaskType = domain.TaskType(taskType)
+	if task.TaskType == "" {
+		task.TaskType = domain.TaskTypeGitMirror
+	}
 	task.CreatedAt = parseTime(createdAt)
 	task.UpdatedAt = parseTime(updatedAt)
 	_ = json.Unmarshal([]byte(triggerJSON), &task.TriggerConfig)
 	_ = json.Unmarshal([]byte(providerJSON), &task.ProviderConfig)
+	_ = json.Unmarshal([]byte(svnConfigJSON), &task.SVNConfig)
+	if task.TaskType == domain.TaskTypeSVNImport {
+		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
+			task.SVNConfig.TrunkPath = "trunk"
+		}
+		if strings.TrimSpace(task.SVNConfig.BranchesPath) == "" {
+			task.SVNConfig.BranchesPath = "branches"
+		}
+		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
+			task.SVNConfig.TagsPath = "tags"
+		}
+	}
 	if withLatest {
 		if lastExecutionID.Valid {
 			task.LastExecutionID = &lastExecutionID.Int64
@@ -288,6 +314,9 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 
 func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.SyncTask, error) {
 	now := time.Now().UTC()
+	if task.TaskType == "" {
+		task.TaskType = domain.TaskTypeGitMirror
+	}
 	if !task.SyncAllRefs {
 		task.SyncAllRefs = true
 	}
@@ -297,16 +326,27 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 	if task.ProviderConfig.Visibility == "" {
 		task.ProviderConfig.Visibility = domain.VisibilityPrivate
 	}
+	if task.TaskType == domain.TaskTypeSVNImport {
+		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
+			task.SVNConfig.TrunkPath = "trunk"
+		}
+		if strings.TrimSpace(task.SVNConfig.BranchesPath) == "" {
+			task.SVNConfig.BranchesPath = "branches"
+		}
+		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
+			task.SVNConfig.TagsPath = "tags"
+		}
+	}
 
 	if task.ID == 0 {
 		res, err := s.db.ExecContext(ctx, `
 INSERT INTO sync_tasks (
-  name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id, submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id,
-  enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID,
+  task_type, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id, submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id,
+  enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, svn_config, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			task.TaskType, task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID,
 			boolInt(task.Enabled), boolInt(task.RecursiveSubmodules), boolInt(task.SyncAllRefs),
-			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), timeString(now), timeString(now),
+			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), toJSON(task.SVNConfig), timeString(now), timeString(now),
 		)
 		if err != nil {
 			return domain.SyncTask{}, err
@@ -315,12 +355,12 @@ INSERT INTO sync_tasks (
 	} else {
 		_, err := s.db.ExecContext(ctx, `
 UPDATE sync_tasks SET
-  name = ?, source_repo_url = ?, target_repo_url = ?, cache_base_path = ?, source_credential_id = ?, submodule_source_credential_id = ?, target_credential_id = ?, submodule_target_credential_id = ?, target_api_credential_id = ?, submodule_target_api_credential_id = ?,
-  enabled = ?, recursive_submodules = ?, sync_all_refs = ?, trigger_config = ?, provider_config = ?, updated_at = ?
+  task_type = ?, name = ?, source_repo_url = ?, target_repo_url = ?, cache_base_path = ?, source_credential_id = ?, submodule_source_credential_id = ?, target_credential_id = ?, submodule_target_credential_id = ?, target_api_credential_id = ?, submodule_target_api_credential_id = ?,
+  enabled = ?, recursive_submodules = ?, sync_all_refs = ?, trigger_config = ?, provider_config = ?, svn_config = ?, updated_at = ?
 WHERE id = ?`,
-			task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID,
+			task.TaskType, task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID,
 			boolInt(task.Enabled), boolInt(task.RecursiveSubmodules), boolInt(task.SyncAllRefs),
-			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), timeString(now), task.ID,
+			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), toJSON(task.SVNConfig), timeString(now), task.ID,
 		)
 		if err != nil {
 			return domain.SyncTask{}, err
@@ -331,9 +371,9 @@ WHERE id = ?`,
 
 func (s *Store) GetTask(ctx context.Context, id int64) (domain.SyncTask, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id,
+SELECT id, task_type, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id,
 submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id,
-enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, created_at, updated_at
+enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, svn_config, created_at, updated_at
 FROM sync_tasks WHERE id = ?`, id)
 	return scanTask(row, false)
 }
@@ -341,8 +381,8 @@ FROM sync_tasks WHERE id = ?`, id)
 func (s *Store) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-  t.id, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.submodule_source_credential_id, t.target_credential_id, t.submodule_target_credential_id, t.target_api_credential_id, t.submodule_target_api_credential_id,
-  t.enabled, t.recursive_submodules, t.sync_all_refs, t.trigger_config, t.provider_config, t.created_at, t.updated_at,
+  t.id, t.task_type, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.submodule_source_credential_id, t.target_credential_id, t.submodule_target_credential_id, t.target_api_credential_id, t.submodule_target_api_credential_id,
+  t.enabled, t.recursive_submodules, t.sync_all_refs, t.trigger_config, t.provider_config, t.svn_config, t.created_at, t.updated_at,
   e.id, COALESCE(e.status, ''), e.started_at, COALESCE(e.repo_count, 0), COALESCE(e.created_repo_count, 0)
 FROM sync_tasks t
 LEFT JOIN sync_executions e ON e.id = (

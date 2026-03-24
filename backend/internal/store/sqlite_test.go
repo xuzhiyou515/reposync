@@ -131,3 +131,41 @@ func TestTaskRoundTripWithSubmoduleCredentials(t *testing.T) {
 		t.Fatalf("expected submodule target api credential id to round trip, got %+v", task.SubmoduleTargetAPICredentialID)
 	}
 }
+
+func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reposync.db")
+	db, err := New(dbPath, security.NewSecretBox("test-secret"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	task, err := db.SaveTask(ctx, domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-import",
+		SourceRepoURL: "https://svn.example.com/repos/demo",
+		TargetRepoURL: "https://git.example.com/mirror/demo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGitHub,
+			Visibility: domain.VisibilityPrivate,
+		},
+		SVNConfig: domain.SVNConfig{
+			AuthorsFilePath: "/tmp/authors.txt",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if task.TaskType != domain.TaskTypeSVNImport {
+		t.Fatalf("expected task type svn_import, got %s", task.TaskType)
+	}
+	if task.SVNConfig.TrunkPath != "trunk" || task.SVNConfig.BranchesPath != "branches" || task.SVNConfig.TagsPath != "tags" {
+		t.Fatalf("expected default svn layout, got %+v", task.SVNConfig)
+	}
+	if task.SVNConfig.AuthorsFilePath != "/tmp/authors.txt" {
+		t.Fatalf("expected authors file path to round trip, got %q", task.SVNConfig.AuthorsFilePath)
+	}
+}

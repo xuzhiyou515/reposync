@@ -147,3 +147,13 @@
 ### 缓存自愈与发布脚本
 - 镜像缓存目录存在但不是有效 mirror 仓库时，执行前自动清理并重建，避免 `already exists and is not an empty directory`
 - `build-release.ps1/.sh` 改为覆盖更新策略，不再删除整个 `release/`，保留 `release/data` 和 `release/config/reposync.env`
+
+## 2026-03-24 Incremental Update
+
+### Phase 7: SVN -> Git scaffold
+- Added task type `svn_import` across the task domain model, SQLite storage, and frontend types.
+- Added `svnConfig` with `trunkPath`, `branchesPath`, `tagsPath`, and optional `authorsFilePath`.
+- Added backend validation for `svn_import`: source must use `http/https`, source credential cannot be `ssh_key`, recursive submodules are disabled, and webhook trigger is rejected.
+- Reserved a dedicated execution branch for `svn_import`; for now it fails fast with a clear "not implemented yet" message instead of entering the Git mirror pipeline.
+- Updated the task editor so the UI can switch between `Git Mirror` and `SVN Import` and show the relevant fields.
+- Added store/service tests covering SVN task round-trip, validation, and guarded execution behavior.

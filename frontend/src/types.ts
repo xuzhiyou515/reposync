@@ -1,6 +1,7 @@
 export type ProviderType = 'github' | 'gogs'
 export type Visibility = 'private' | 'public'
 export type CredentialType = 'ssh_key' | 'https_token' | 'api_token'
+export type TaskType = 'git_mirror' | 'svn_import'
 
 export interface TriggerConfig {
   cron: string
@@ -18,8 +19,16 @@ export interface ProviderConfig {
   baseApiUrl: string
 }
 
+export interface SVNConfig {
+  trunkPath: string
+  branchesPath: string
+  tagsPath: string
+  authorsFilePath: string
+}
+
 export interface SyncTask {
   id: number
+  taskType: TaskType
   name: string
   sourceRepoUrl: string
   targetRepoUrl: string
@@ -35,6 +44,7 @@ export interface SyncTask {
   syncAllRefs: boolean
   triggerConfig: TriggerConfig
   providerConfig: ProviderConfig
+  svnConfig: SVNConfig
   scheduleCron?: string
   nextRunAt?: string
   lastExecutionId?: number

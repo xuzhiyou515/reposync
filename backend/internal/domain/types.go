@@ -24,6 +24,13 @@ const (
 	VisibilityPublic  Visibility = "public"
 )
 
+type TaskType string
+
+const (
+	TaskTypeGitMirror TaskType = "git_mirror"
+	TaskTypeSVNImport TaskType = "svn_import"
+)
+
 type ExecutionStatus string
 
 const (
@@ -56,8 +63,16 @@ type ProviderConfig struct {
 	BaseAPIURL          string       `json:"baseApiUrl"`
 }
 
+type SVNConfig struct {
+	TrunkPath       string `json:"trunkPath"`
+	BranchesPath    string `json:"branchesPath"`
+	TagsPath        string `json:"tagsPath"`
+	AuthorsFilePath string `json:"authorsFilePath"`
+}
+
 type SyncTask struct {
 	ID                             int64          `json:"id"`
+	TaskType                       TaskType       `json:"taskType"`
 	Name                           string         `json:"name"`
 	SourceRepoURL                  string         `json:"sourceRepoUrl"`
 	TargetRepoURL                  string         `json:"targetRepoUrl"`
@@ -73,6 +88,7 @@ type SyncTask struct {
 	SyncAllRefs                    bool           `json:"syncAllRefs"`
 	TriggerConfig                  TriggerConfig  `json:"triggerConfig"`
 	ProviderConfig                 ProviderConfig `json:"providerConfig"`
+	SVNConfig                      SVNConfig      `json:"svnConfig"`
 	ScheduleCron                   string         `json:"scheduleCron,omitempty"`
 	NextRunAt                      *time.Time     `json:"nextRunAt,omitempty"`
 	LastExecutionID                *int64         `json:"lastExecutionId,omitempty"`
