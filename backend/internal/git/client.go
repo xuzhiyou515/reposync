@@ -39,6 +39,13 @@ type RewriteResult struct {
 	SourceToTarget map[string]string
 }
 
+type SVNRefPromotionResult struct {
+	BranchCount   int
+	TagCount      int
+	DefaultBranch string
+	DefaultCommit string
+}
+
 func NewClient(bin string) *Client {
 	if strings.TrimSpace(bin) == "" {
 		bin = "git"
@@ -125,8 +132,129 @@ func (c *Client) MirrorPush(ctx context.Context, cachePath string, targetURL str
 	return time.Since(started), nil
 }
 
+func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cachePath string, svnConfig domain.SVNConfig, credential *domain.Credential) (bool, time.Duration, error) {
+	started := time.Now()
+	cacheHit := isGitWorktree(cachePath)
+	authURL, env, cleanup, err := prepareGitAuth(sourceURL, credential)
+	if err != nil {
+		return cacheHit, 0, err
+	}
+	defer cleanup()
+
+	if !cacheHit {
+		if info, statErr := os.Stat(cachePath); statErr == nil && info.IsDir() {
+			if c.logf != nil {
+				c.logf("cache recovery: removing non-repository svn cache dir %s", cachePath)
+			}
+			if err := os.RemoveAll(cachePath); err != nil {
+				return false, 0, err
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+			return false, 0, err
+		}
+		args := buildSVNCloneArgs(authURL, cachePath, svnConfig)
+		if _, err := c.runWithEnv(ctx, "", env, args...); err != nil {
+			return false, 0, err
+		}
+		if authURL != sourceURL {
+			if _, err := c.run(ctx, cachePath, "config", "svn-remote.svn.url", sourceURL); err != nil {
+				return false, 0, err
+			}
+		}
+		return false, time.Since(started), nil
+	}
+
+	restoreURL := sourceURL
+	if authURL != sourceURL {
+		if _, err := c.run(ctx, cachePath, "config", "svn-remote.svn.url", authURL); err != nil {
+			return true, 0, err
+		}
+		defer func() {
+			_, _ = c.run(context.Background(), cachePath, "config", "svn-remote.svn.url", restoreURL)
+		}()
+	}
+	if _, err := c.runWithEnv(ctx, cachePath, env, buildSVNFetchArgs(svnConfig)...); err != nil {
+		return true, 0, err
+	}
+	return true, time.Since(started), nil
+}
+
+func (c *Client) PromoteSVNRefs(ctx context.Context, repoPath string, svnConfig domain.SVNConfig) (SVNRefPromotionResult, error) {
+	refs, err := c.listRefs(ctx, repoPath, "refs/remotes")
+	if err != nil {
+		return SVNRefPromotionResult{}, err
+	}
+	result := SVNRefPromotionResult{
+		DefaultBranch: trunkBranchName(svnConfig.TrunkPath),
+	}
+	for _, ref := range refs {
+		kind, name := classifySVNRemoteRef(ref.Name, svnConfig)
+		if kind == "" || strings.TrimSpace(name) == "" {
+			continue
+		}
+		switch kind {
+		case "branch":
+			if _, err := c.run(ctx, repoPath, "branch", "-f", name, ref.ObjectName); err != nil {
+				return SVNRefPromotionResult{}, err
+			}
+			result.BranchCount++
+			if name == result.DefaultBranch {
+				result.DefaultCommit = ref.ObjectName
+			}
+		case "tag":
+			if _, err := c.run(ctx, repoPath, "tag", "-f", name, ref.ObjectName); err != nil {
+				return SVNRefPromotionResult{}, err
+			}
+			result.TagCount++
+		}
+	}
+	if result.DefaultCommit == "" && result.DefaultBranch != "" {
+		result.DefaultCommit = c.ResolveRef(ctx, repoPath, "refs/heads/"+result.DefaultBranch)
+	}
+	return result, nil
+}
+
+func (c *Client) PushBranchesAndTags(ctx context.Context, repoPath string, targetURL string, credential *domain.Credential) (time.Duration, error) {
+	started := time.Now()
+	authURL, env, cleanup, err := prepareGitAuth(targetURL, credential)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
+	if _, err := c.run(ctx, repoPath, "remote", "remove", "reposync-target"); err != nil && !strings.Contains(err.Error(), "No such remote") {
+		return 0, err
+	}
+	if _, err := c.run(ctx, repoPath, "remote", "add", "reposync-target", authURL); err != nil {
+		return 0, err
+	}
+	args := []string{
+		"-c", "http.postBuffer=524288000",
+		"-c", "credential.interactive=false",
+		"-c", "http.version=HTTP/1.1",
+		"push", "--progress", "--prune", "reposync-target",
+		"+refs/heads/*:refs/heads/*",
+		"+refs/tags/*:refs/tags/*",
+	}
+	if _, err := c.runWithEnv(ctx, repoPath, env, args...); err != nil {
+		return 0, err
+	}
+	if _, err := c.run(ctx, repoPath, "remote", "remove", "reposync-target"); err != nil && !strings.Contains(err.Error(), "No such remote") {
+		return 0, err
+	}
+	return time.Since(started), nil
+}
+
 func (c *Client) ResolveHEAD(ctx context.Context, repoPath string) string {
 	out, err := c.run(ctx, repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func (c *Client) ResolveRef(ctx context.Context, repoPath string, ref string) string {
+	out, err := c.run(ctx, repoPath, "rev-parse", ref)
 	if err != nil {
 		return ""
 	}
@@ -364,6 +492,11 @@ func isGitMirror(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
+func isGitWorktree(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".git", "HEAD"))
+	return err == nil && !info.IsDir()
+}
+
 func (c *Client) listRemoteBranches(ctx context.Context, repoPath string) ([]string, error) {
 	out, err := c.run(ctx, repoPath, "for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin")
 	if err != nil {
@@ -383,6 +516,100 @@ func (c *Client) listRemoteBranches(ctx context.Context, repoPath string) ([]str
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+type gitRef struct {
+	Name       string
+	ObjectName string
+}
+
+func (c *Client) listRefs(ctx context.Context, repoPath string, refPrefix string) ([]gitRef, error) {
+	out, err := c.run(ctx, repoPath, "for-each-ref", "--format=%(refname:short) %(objectname)", refPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var refs []gitRef
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		refs = append(refs, gitRef{Name: fields[0], ObjectName: fields[1]})
+	}
+	return refs, nil
+}
+
+func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNConfig) []string {
+	args := []string{
+		"svn", "clone", sourceURL, cachePath,
+		"--prefix=svn/",
+		"--trunk=" + defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk"),
+		"--branches=" + defaultSVNLayoutPath(svnConfig.BranchesPath, "branches"),
+		"--tags=" + defaultSVNLayoutPath(svnConfig.TagsPath, "tags"),
+	}
+	if strings.TrimSpace(svnConfig.AuthorsFilePath) != "" {
+		args = append(args, "--authors-file="+svnConfig.AuthorsFilePath)
+	}
+	return args
+}
+
+func buildSVNFetchArgs(svnConfig domain.SVNConfig) []string {
+	args := []string{"svn", "fetch"}
+	if strings.TrimSpace(svnConfig.AuthorsFilePath) != "" {
+		args = append(args, "--authors-file="+svnConfig.AuthorsFilePath)
+	}
+	return args
+}
+
+func defaultSVNLayoutPath(value string, fallback string) string {
+	trimmed := strings.Trim(strings.TrimSpace(value), "/")
+	if trimmed == "" {
+		return fallback
+	}
+	return trimmed
+}
+
+func trunkBranchName(trunkPath string) string {
+	normalized := strings.ReplaceAll(defaultSVNLayoutPath(trunkPath, "trunk"), "\\", "/")
+	parts := strings.Split(normalized, "/")
+	return parts[len(parts)-1]
+}
+
+func classifySVNRemoteRef(refName string, svnConfig domain.SVNConfig) (string, string) {
+	name := strings.TrimSpace(refName)
+	if name == "" {
+		return "", ""
+	}
+	trimmed := strings.TrimPrefix(name, "svn/")
+	normalizedTrunk := defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk")
+	normalizedBranches := defaultSVNLayoutPath(svnConfig.BranchesPath, "branches")
+	normalizedTags := defaultSVNLayoutPath(svnConfig.TagsPath, "tags")
+
+	if trimmed == normalizedTrunk || name == normalizedTrunk {
+		return "branch", trunkBranchName(svnConfig.TrunkPath)
+	}
+	if strings.HasPrefix(trimmed, normalizedBranches+"/") {
+		return "branch", strings.TrimPrefix(trimmed, normalizedBranches+"/")
+	}
+	if strings.HasPrefix(trimmed, normalizedTags+"/") {
+		return "tag", strings.TrimPrefix(trimmed, normalizedTags+"/")
+	}
+	if strings.HasPrefix(name, "tags/") {
+		return "tag", strings.TrimPrefix(name, "tags/")
+	}
+	if strings.HasPrefix(trimmed, "tags/") {
+		return "tag", strings.TrimPrefix(trimmed, "tags/")
+	}
+	if strings.HasPrefix(trimmed, "branches/") {
+		return "branch", strings.TrimPrefix(trimmed, "branches/")
+	}
+	if strings.HasPrefix(trimmed, "remote/") || trimmed == "HEAD" {
+		return "", ""
+	}
+	if strings.HasPrefix(name, "svn/") && !strings.Contains(trimmed, "/") {
+		return "branch", trimmed
+	}
+	return "", ""
 }
 
 type submoduleConfig struct {

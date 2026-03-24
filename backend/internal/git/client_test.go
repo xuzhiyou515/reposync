@@ -53,3 +53,53 @@ func TestSanitizeArgsMasksEmbeddedSecrets(t *testing.T) {
 		t.Fatalf("expected masked placeholder, got %s", safe)
 	}
 }
+
+func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
+	args := buildSVNCloneArgs("https://svn.example.com/repos/demo", "D:/cache/demo", domain.SVNConfig{
+		TrunkPath:       "proj/trunk",
+		BranchesPath:    "proj/branches",
+		TagsPath:        "proj/tags",
+		AuthorsFilePath: "D:/authors.txt",
+	})
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{
+		"svn clone",
+		"--prefix=svn/",
+		"--trunk=proj/trunk",
+		"--branches=proj/branches",
+		"--tags=proj/tags",
+		"--authors-file=D:/authors.txt",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected args to contain %q, got %s", expected, joined)
+		}
+	}
+}
+
+func TestClassifySVNRemoteRef(t *testing.T) {
+	config := domain.SVNConfig{
+		TrunkPath:    "trunk",
+		BranchesPath: "branches",
+		TagsPath:     "tags",
+	}
+	cases := []struct {
+		ref  string
+		kind string
+		name string
+	}{
+		{ref: "svn/trunk", kind: "branch", name: "trunk"},
+		{ref: "svn/branches/release/1.0", kind: "branch", name: "release/1.0"},
+		{ref: "svn/tags/v1.0.0", kind: "tag", name: "v1.0.0"},
+		{ref: "tags/v2.0.0", kind: "tag", name: "v2.0.0"},
+		{ref: "svn/feature-x", kind: "branch", name: "feature-x"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.ref, func(t *testing.T) {
+			kind, name := classifySVNRemoteRef(tc.ref, config)
+			if kind != tc.kind || name != tc.name {
+				t.Fatalf("expected (%s, %s), got (%s, %s)", tc.kind, tc.name, kind, name)
+			}
+		})
+	}
+}

@@ -394,10 +394,6 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		s.clearTaskRunning(taskID)
 		return domain.SyncExecution{}, fmt.Errorf("task is disabled")
 	}
-	if task.TaskType == domain.TaskTypeSVNImport {
-		s.clearTaskRunning(taskID)
-		return domain.SyncExecution{}, fmt.Errorf("svn_import execution is not implemented yet")
-	}
 	sourceCredential, err := s.store.CredentialByOptionalID(ctx, task.SourceCredentialID)
 	if err != nil && err != sql.ErrNoRows {
 		s.clearTaskRunning(taskID)
@@ -474,6 +470,11 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger domain.Trig
 		TargetAPI: submoduleTargetAPICredential,
 	}
 
+	if task.TaskType == domain.TaskTypeSVNImport {
+		go s.executeSVNTask(context.Background(), task, execution, rootCredentials)
+		return execution, nil
+	}
+
 	go s.executeTask(context.Background(), task, trigger, execution, rootCredentials, submoduleCredentials)
 	return execution, nil
 }
@@ -512,6 +513,156 @@ func (s *Service) executeTask(ctx context.Context, task domain.SyncTask, trigger
 		logger.log(ctx, "Execution completed: mirrored %d repositories and auto-created %d targets", counters.repoCount, counters.createdRepoCount)
 	}
 	logger.flush(ctx)
+}
+
+func (s *Service) executeSVNTask(ctx context.Context, task domain.SyncTask, execution domain.SyncExecution, credentials repositoryCredentials) {
+	defer s.clearTaskRunning(task.ID)
+	defer s.dropExecutionState(execution.ID)
+
+	lock := s.taskLock(task.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	logger := &executionLogger{store: s.store, execution: &execution}
+	counters := &executionCounters{}
+	logger.onUpdate = func(updated domain.SyncExecution) {
+		s.updateExecutionState(execution.ID, func(detail *domain.ExecutionDetail) {
+			detail.Execution = updated
+		})
+	}
+	gitClient := s.git.WithLogger(func(format string, args ...any) {
+		logger.log(ctx, format, args...)
+	})
+	runErr := s.syncSVNRepository(ctx, gitClient, execution.ID, task, credentials, counters, logger)
+
+	finished := east8Now()
+	execution.FinishedAt = &finished
+	execution.RepoCount = counters.repoCount
+	execution.CreatedRepoCount = counters.createdRepoCount
+	execution.FailedNodeCount = counters.failedNodeCount
+	if runErr != nil {
+		execution.Status = domain.ExecutionStatusFailed
+		logger.log(ctx, "SVN import failed: %v", runErr)
+	} else {
+		execution.Status = domain.ExecutionStatusSuccess
+		logger.log(ctx, "SVN import completed: synchronized %d repository and auto-created %d targets", counters.repoCount, counters.createdRepoCount)
+	}
+	logger.flush(ctx)
+}
+
+func (s *Service) syncSVNRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, credentials repositoryCredentials, counters *executionCounters, logger *executionLogger) error {
+	node, err := s.createExecutionNode(ctx, domain.SyncExecutionNode{
+		ExecutionID:   executionID,
+		RepoPath:      "",
+		SourceRepoURL: task.SourceRepoURL,
+		TargetRepoURL: task.TargetRepoURL,
+		Depth:         0,
+		Status:        domain.ExecutionStatusRunning,
+	})
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	cacheKey := buildCacheKey(task.SourceRepoURL, task.TargetRepoURL)
+	cacheRoot := resolveCacheBase(s.cacheDir, task.CacheBasePath)
+	cachePath := filepath.Join(cacheRoot, cacheKey)
+	_ = os.MkdirAll(cacheRoot, 0o755)
+
+	cacheHit := false
+	hitCount := 1
+	if existing, getErr := s.store.GetCacheByKey(ctx, cacheKey); getErr == nil {
+		cacheHit = true
+		hitCount = existing.HitCount + 1
+	} else if getErr != nil && getErr != sql.ErrNoRows {
+		return getErr
+	}
+
+	logger.log(ctx, "Ensuring target repository for SVN import")
+	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, task.TargetRepoURL, task.ProviderConfig, credentials.TargetAPI)
+	node.CacheKey = cacheKey
+	node.CacheHit = cacheHit
+	node.AutoCreated = autoCreated
+	node.CreateDuration = createDuration.Milliseconds()
+	if createErr != nil {
+		node.Status = domain.ExecutionStatusFailed
+		node.ErrorMessage = createErr.Error()
+		counters.failedNodeCount++
+		_ = s.updateExecutionNode(ctx, node)
+		return createErr
+	}
+	if autoCreated {
+		counters.createdRepoCount++
+		logger.log(ctx, "Created target repository in %dms", node.CreateDuration)
+	} else {
+		logger.log(ctx, "Verified target repository in %dms", node.CreateDuration)
+	}
+
+	logger.log(ctx, "Refreshing SVN import cache")
+	cacheHitFromGit, fetchDuration, fetchErr := gitClient.EnsureSVNCheckout(ctx, task.SourceRepoURL, cachePath, task.SVNConfig, credentials.Source)
+	cacheSize := dirSize(cachePath)
+	node.CacheHit = node.CacheHit || cacheHitFromGit
+	node.FetchDuration = fetchDuration.Milliseconds()
+	if fetchErr != nil {
+		node.Status = domain.ExecutionStatusFailed
+		node.ErrorMessage = fetchErr.Error()
+		counters.failedNodeCount++
+		_ = s.store.UpsertCache(ctx, domain.RepoCache{
+			CacheKey:         cacheKey,
+			SourceRepoURL:    task.SourceRepoURL,
+			AuthContext:      "managed",
+			CachePath:        cachePath,
+			LastFetchAt:      &now,
+			LastUsedAt:       &now,
+			HitCount:         hitCount,
+			SizeBytes:        cacheSize,
+			HealthStatus:     "broken",
+			LastErrorMessage: fetchErr.Error(),
+		})
+		_ = s.updateExecutionNode(ctx, node)
+		return fetchErr
+	}
+
+	if err := s.store.UpsertCache(ctx, domain.RepoCache{
+		CacheKey:      cacheKey,
+		SourceRepoURL: task.SourceRepoURL,
+		AuthContext:   "managed",
+		CachePath:     cachePath,
+		LastFetchAt:   &now,
+		LastUsedAt:    &now,
+		HitCount:      hitCount,
+		SizeBytes:     cacheSize,
+		HealthStatus:  "ready",
+	}); err != nil {
+		return err
+	}
+
+	logger.log(ctx, "Promoting SVN refs into Git branches/tags")
+	promoted, promoteErr := gitClient.PromoteSVNRefs(ctx, cachePath, task.SVNConfig)
+	if promoteErr != nil {
+		node.Status = domain.ExecutionStatusFailed
+		node.ErrorMessage = promoteErr.Error()
+		counters.failedNodeCount++
+		_ = s.updateExecutionNode(ctx, node)
+		return promoteErr
+	}
+	node.ReferenceCommit = promoted.DefaultCommit
+	logger.log(ctx, "Prepared %d branches and %d tags from SVN refs", promoted.BranchCount, promoted.TagCount)
+
+	logger.log(ctx, "Pushing Git branches and tags to target")
+	pushDuration, pushErr := gitClient.PushBranchesAndTags(ctx, cachePath, task.TargetRepoURL, credentials.TargetGit)
+	node.PushDuration = pushDuration.Milliseconds()
+	node.Status = executionStatus(pushErr)
+	node.ErrorMessage = errorString(pushErr)
+	if pushErr != nil {
+		counters.failedNodeCount++
+		_ = s.updateExecutionNode(ctx, node)
+		return pushErr
+	}
+
+	logger.log(ctx, "Completed SVN import in %dms", node.PushDuration)
+	counters.repoCount++
+	return s.updateExecutionNode(ctx, node)
 }
 
 func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, executionID int64, task domain.SyncTask, repoPath string, sourceRepoURL string, targetRepoURL string, referenceCommit string, depth int, parentNodeID *int64, currentCredentials repositoryCredentials, submoduleCredentials repositoryCredentials, visited map[string]bool, counters *executionCounters, logger *executionLogger) (syncResult, error) {

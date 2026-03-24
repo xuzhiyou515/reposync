@@ -157,3 +157,12 @@
 - Reserved a dedicated execution branch for `svn_import`; for now it fails fast with a clear "not implemented yet" message instead of entering the Git mirror pipeline.
 - Updated the task editor so the UI can switch between `Git Mirror` and `SVN Import` and show the relevant fields.
 - Added store/service tests covering SVN task round-trip, validation, and guarded execution behavior.
+
+## 2026-03-24 Incremental Update (2)
+
+### Phase 7: SVN execution backbone
+- Added `git svn clone/fetch` support in the Git client layer, including cache reuse for SVN import worktrees.
+- Added SVN remote ref promotion so imported SVN refs can be materialized as Git branches and real Git tags before push.
+- Added `refs/heads/*` and `refs/tags/*` push flow for `svn_import`, reusing the existing target repository auto-create pipeline.
+- Upgraded `svn_import` from placeholder rejection to real asynchronous execution in the service layer, including execution nodes, cache records, logs, and status updates.
+- Added Git client tests covering SVN clone argument generation and SVN remote ref classification.

@@ -228,7 +228,7 @@ func TestSaveTaskRejectsWebhookForSVNImport(t *testing.T) {
 	}
 }
 
-func TestRunTaskRejectsSVNImportUntilExecutorIsImplemented(t *testing.T) {
+func TestSaveTaskDefaultsSVNLayoutPaths(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "reposync.db")
 
@@ -252,13 +252,8 @@ func TestRunTaskRejectsSVNImportUntilExecutorIsImplemented(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save task: %v", err)
 	}
-
-	_, err = svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
-	if err == nil {
-		t.Fatal("expected svn import run to be rejected")
-	}
-	if !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("expected not implemented error, got %v", err)
+	if task.SVNConfig.TrunkPath != "trunk" || task.SVNConfig.BranchesPath != "branches" || task.SVNConfig.TagsPath != "tags" {
+		t.Fatalf("expected default svn layout to be applied, got %+v", task.SVNConfig)
 	}
 }
 
