@@ -1,6 +1,7 @@
 package git
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
 		BranchesPath:    "proj/branches",
 		TagsPath:        "proj/tags",
 		AuthorsFilePath: "D:/authors.txt",
-	})
+	}, []string{"--authors-file=D:/authors.txt"})
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
 		"svn clone",
@@ -73,6 +74,41 @@ func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected args to contain %q, got %s", expected, joined)
 		}
+	}
+}
+
+func TestPrepareSVNAuthorArgsUsesAuthorsFileWhenProvided(t *testing.T) {
+	args, cleanup, err := prepareSVNAuthorArgs(domain.SVNConfig{
+		AuthorsFilePath: "D:/authors.txt",
+		AuthorDomain:    "svn.example.com",
+	})
+	if err != nil {
+		t.Fatalf("prepare authors args: %v", err)
+	}
+	defer cleanup()
+
+	if len(args) != 1 || args[0] != "--authors-file=D:/authors.txt" {
+		t.Fatalf("expected authors-file arg, got %v", args)
+	}
+}
+
+func TestPrepareSVNAuthorArgsFallsBackToAuthorsProg(t *testing.T) {
+	args, cleanup, err := prepareSVNAuthorArgs(domain.SVNConfig{
+		AuthorDomain: "svn.example.com",
+	})
+	if err != nil {
+		t.Fatalf("prepare authors args: %v", err)
+	}
+	if len(args) != 1 || !strings.HasPrefix(args[0], "--authors-prog=") {
+		t.Fatalf("expected authors-prog arg, got %v", args)
+	}
+	progPath := strings.TrimPrefix(args[0], "--authors-prog=")
+	if _, statErr := os.Stat(progPath); statErr != nil {
+		t.Fatalf("expected authors prog to exist: %v", statErr)
+	}
+	cleanup()
+	if _, statErr := os.Stat(progPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected authors prog to be removed, got %v", statErr)
 	}
 }
 

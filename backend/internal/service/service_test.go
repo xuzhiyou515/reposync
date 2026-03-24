@@ -255,6 +255,9 @@ func TestSaveTaskDefaultsSVNLayoutPaths(t *testing.T) {
 	if task.SVNConfig.TrunkPath != "trunk" || task.SVNConfig.BranchesPath != "branches" || task.SVNConfig.TagsPath != "tags" {
 		t.Fatalf("expected default svn layout to be applied, got %+v", task.SVNConfig)
 	}
+	if task.SVNConfig.AuthorDomain != "svn.example.com" {
+		t.Fatalf("expected default svn author domain from source host, got %q", task.SVNConfig.AuthorDomain)
+	}
 }
 
 func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {

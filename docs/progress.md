@@ -166,3 +166,12 @@
 - Added `refs/heads/*` and `refs/tags/*` push flow for `svn_import`, reusing the existing target repository auto-create pipeline.
 - Upgraded `svn_import` from placeholder rejection to real asynchronous execution in the service layer, including execution nodes, cache records, logs, and status updates.
 - Added Git client tests covering SVN clone argument generation and SVN remote ref classification.
+
+## 2026-03-24 Incremental Update (3)
+
+### Phase 7: SVN author mapping fallback
+- Added `svnConfig.authorDomain` so SVN import can control the default email suffix used for synthesized Git authors.
+- When `authors.txt` is not provided, `git svn` now uses a generated `authors-prog` helper and maps SVN authors to `name <name@domain>`.
+- Default author domain now falls back to the SVN source host name in the service layer, with storage-level fallback to `svn.local`.
+- Updated the management UI to explain the fallback behavior and allow overriding the default author domain.
+- Added tests covering `authors-file` vs `authors-prog` argument selection and default author domain behavior.

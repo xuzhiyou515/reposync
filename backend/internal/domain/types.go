@@ -68,6 +68,7 @@ type SVNConfig struct {
 	BranchesPath    string `json:"branchesPath"`
 	TagsPath        string `json:"tagsPath"`
 	AuthorsFilePath string `json:"authorsFilePath"`
+	AuthorDomain    string `json:"authorDomain"`
 }
 
 type SyncTask struct {

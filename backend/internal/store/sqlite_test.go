@@ -154,6 +154,7 @@ func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
 		},
 		SVNConfig: domain.SVNConfig{
 			AuthorsFilePath: "/tmp/authors.txt",
+			AuthorDomain:    "svn.example.com",
 		},
 	})
 	if err != nil {
@@ -167,5 +168,8 @@ func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
 	}
 	if task.SVNConfig.AuthorsFilePath != "/tmp/authors.txt" {
 		t.Fatalf("expected authors file path to round trip, got %q", task.SVNConfig.AuthorsFilePath)
+	}
+	if task.SVNConfig.AuthorDomain != "svn.example.com" {
+		t.Fatalf("expected author domain to round trip, got %q", task.SVNConfig.AuthorDomain)
 	}
 }

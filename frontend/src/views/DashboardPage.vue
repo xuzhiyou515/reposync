@@ -75,6 +75,7 @@ const emptyTask = (): Partial<SyncTask> => ({
     branchesPath: 'branches',
     tagsPath: 'tags',
     authorsFilePath: '',
+    authorDomain: '',
   },
 })
 
@@ -492,6 +493,7 @@ const editTask = (task: SyncTask) => {
     branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
     tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
     authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
+    authorDomain: taskForm.svnConfig?.authorDomain || '',
   }
   taskDialogVisible.value = true
   void nextTick(() => taskFormRef.value?.clearValidate())
@@ -562,6 +564,7 @@ watch(
         branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
         tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
         authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
+        authorDomain: taskForm.svnConfig?.authorDomain || '',
       }
       return
     }
@@ -570,6 +573,7 @@ watch(
       branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
       tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
       authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
+      authorDomain: taskForm.svnConfig?.authorDomain || '',
     }
   },
 )
@@ -1365,6 +1369,12 @@ onBeforeUnmount(() => {
               </el-form-item>
               <el-form-item label="authors.txt 文件">
                 <el-input v-model="taskForm.svnConfig!.authorsFilePath" placeholder="可选，本地文件路径" />
+              </el-form-item>
+            </div>
+            <div class="two-column form-grid-wide">
+              <el-form-item label="默认作者域名">
+                <el-input v-model="taskForm.svnConfig!.authorDomain" placeholder="留空时默认使用 SVN 主机名" />
+                <div class="field-help">当未提供 `authors.txt` 时，会把 SVN 作者映射为 `name &lt;name@domain&gt;`。</div>
               </el-form-item>
             </div>
           </div>

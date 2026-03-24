@@ -57,6 +57,9 @@ func normalizeTask(task domain.SyncTask) domain.SyncTask {
 		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
 			task.SVNConfig.TagsPath = "tags"
 		}
+		if strings.TrimSpace(task.SVNConfig.AuthorDomain) == "" {
+			task.SVNConfig.AuthorDomain = defaultSVNAuthorDomain(task.SourceRepoURL)
+		}
 	}
 	return task
 }
@@ -102,6 +105,18 @@ func isHTTPRepoURL(raw string) bool {
 	default:
 		return false
 	}
+}
+
+func defaultSVNAuthorDomain(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "svn.local"
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return "svn.local"
+	}
+	return strings.ToLower(host)
 }
 
 func (s *Service) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {

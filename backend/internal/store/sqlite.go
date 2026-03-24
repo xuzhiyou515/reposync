@@ -299,6 +299,9 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
 			task.SVNConfig.TagsPath = "tags"
 		}
+		if strings.TrimSpace(task.SVNConfig.AuthorDomain) == "" {
+			task.SVNConfig.AuthorDomain = "svn.local"
+		}
 	}
 	if withLatest {
 		if lastExecutionID.Valid {
@@ -335,6 +338,9 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 		}
 		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
 			task.SVNConfig.TagsPath = "tags"
+		}
+		if strings.TrimSpace(task.SVNConfig.AuthorDomain) == "" {
+			task.SVNConfig.AuthorDomain = "svn.local"
 		}
 	}
 

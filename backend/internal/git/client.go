@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -140,6 +141,11 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 		return cacheHit, 0, err
 	}
 	defer cleanup()
+	authorArgs, authorCleanup, err := prepareSVNAuthorArgs(svnConfig)
+	if err != nil {
+		return cacheHit, 0, err
+	}
+	defer authorCleanup()
 
 	if !cacheHit {
 		if info, statErr := os.Stat(cachePath); statErr == nil && info.IsDir() {
@@ -153,7 +159,7 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 			return false, 0, err
 		}
-		args := buildSVNCloneArgs(authURL, cachePath, svnConfig)
+		args := buildSVNCloneArgs(authURL, cachePath, svnConfig, authorArgs)
 		if _, err := c.runWithEnv(ctx, "", env, args...); err != nil {
 			return false, 0, err
 		}
@@ -174,7 +180,7 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 			_, _ = c.run(context.Background(), cachePath, "config", "svn-remote.svn.url", restoreURL)
 		}()
 	}
-	if _, err := c.runWithEnv(ctx, cachePath, env, buildSVNFetchArgs(svnConfig)...); err != nil {
+	if _, err := c.runWithEnv(ctx, cachePath, env, buildSVNFetchArgs(authorArgs)...); err != nil {
 		return true, 0, err
 	}
 	return true, time.Since(started), nil
@@ -539,7 +545,7 @@ func (c *Client) listRefs(ctx context.Context, repoPath string, refPrefix string
 	return refs, nil
 }
 
-func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNConfig) []string {
+func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNConfig, authorArgs []string) []string {
 	args := []string{
 		"svn", "clone", sourceURL, cachePath,
 		"--prefix=svn/",
@@ -547,18 +553,87 @@ func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNC
 		"--branches=" + defaultSVNLayoutPath(svnConfig.BranchesPath, "branches"),
 		"--tags=" + defaultSVNLayoutPath(svnConfig.TagsPath, "tags"),
 	}
-	if strings.TrimSpace(svnConfig.AuthorsFilePath) != "" {
-		args = append(args, "--authors-file="+svnConfig.AuthorsFilePath)
-	}
+	args = append(args, authorArgs...)
 	return args
 }
 
-func buildSVNFetchArgs(svnConfig domain.SVNConfig) []string {
+func buildSVNFetchArgs(authorArgs []string) []string {
 	args := []string{"svn", "fetch"}
-	if strings.TrimSpace(svnConfig.AuthorsFilePath) != "" {
-		args = append(args, "--authors-file="+svnConfig.AuthorsFilePath)
-	}
+	args = append(args, authorArgs...)
 	return args
+}
+
+func prepareSVNAuthorArgs(svnConfig domain.SVNConfig) ([]string, func(), error) {
+	if strings.TrimSpace(svnConfig.AuthorsFilePath) != "" {
+		return []string{"--authors-file=" + svnConfig.AuthorsFilePath}, func() {}, nil
+	}
+	domain := strings.TrimSpace(svnConfig.AuthorDomain)
+	if domain == "" {
+		domain = "svn.local"
+	}
+	progPath, cleanup, err := createSVNAuthorsProg(domain)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []string{"--authors-prog=" + progPath}, cleanup, nil
+}
+
+func createSVNAuthorsProg(domain string) (string, func(), error) {
+	safeDomain := strings.TrimSpace(domain)
+	if safeDomain == "" {
+		safeDomain = "svn.local"
+	}
+	if runtime.GOOS == "windows" {
+		file, err := os.CreateTemp("", "reposync-authors-*.cmd")
+		if err != nil {
+			return "", nil, err
+		}
+		path := file.Name()
+		content := strings.Join([]string{
+			"@echo off",
+			"set USERNAME=%~1",
+			"if \"%USERNAME%\"==\"\" exit /b 1",
+			fmt.Sprintf("echo %%USERNAME%% = %%USERNAME%% ^<%%USERNAME%%@%s^>", safeDomain),
+			"",
+		}, "\r\n")
+		if _, err := file.WriteString(content); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return "", nil, err
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return "", nil, err
+		}
+		return path, func() { _ = os.Remove(path) }, nil
+	}
+
+	file, err := os.CreateTemp("", "reposync-authors-*.sh")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	content := strings.Join([]string{
+		"#!/bin/sh",
+		`username="$1"`,
+		`[ -n "$username" ] || exit 1`,
+		fmt.Sprintf(`printf '%%s = %%s <%%s@%s>\n' "$username" "$username" "$username"`, safeDomain),
+		"",
+	}, "\n")
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		_ = os.Remove(path)
+		return "", nil, err
+	}
+	return path, func() { _ = os.Remove(path) }, nil
 }
 
 func defaultSVNLayoutPath(value string, fallback string) string {

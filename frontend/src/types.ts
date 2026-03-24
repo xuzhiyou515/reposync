@@ -24,6 +24,7 @@ export interface SVNConfig {
   branchesPath: string
   tagsPath: string
   authorsFilePath: string
+  authorDomain: string
 }
 
 export interface SyncTask {
