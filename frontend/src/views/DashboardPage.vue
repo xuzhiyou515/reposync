@@ -100,6 +100,7 @@ const credentialTypeOptions: Array<{ label: string; value: Credential['type'] }>
   { label: 'Git SSH 私钥', value: 'ssh_key' },
 ]
 const taskFormIsSVNImport = computed(() => taskForm.taskType === 'svn_import')
+const isEditingCredential = computed(() => Boolean(credentialForm.id))
 const credentialTypeLabelMap: Record<NonNullable<Credential['type']>, string> = {
   https_token: 'SVN / Git HTTP 用户名密码',
   api_token: '平台 API Token',
@@ -1137,8 +1138,7 @@ onBeforeUnmount(() => {
                   {{ credentialTypeLabelMap[row.type] || row.type }}
                 </template>
               </el-table-column>
-              <el-table-column prop="scope" label="用途" min-width="180" />
-              <el-table-column prop="secretMasked" label="脱敏值" min-width="160" />
+              <el-table-column prop="scope" label="用途" min-width="220" />
               <el-table-column label="操作" width="180">
                 <template #default="{ row }">
                   <div class="action-row">
@@ -1622,7 +1622,8 @@ onBeforeUnmount(() => {
           </div>
           <div class="form-section-body">
             <el-form-item label="类型">
-              <el-segmented v-model="credentialForm.type" :options="credentialTypeOptions" />
+              <el-segmented v-model="credentialForm.type" :options="credentialTypeOptions" :disabled="isEditingCredential" />
+              <div v-if="isEditingCredential" class="field-help">编辑已有凭证时不支持切换类型；如需变更认证方式，请新建一条凭证。</div>
             </el-form-item>
             <div class="task-trigger-preview">
               <div class="panel-header">
