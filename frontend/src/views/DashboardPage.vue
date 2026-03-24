@@ -159,7 +159,6 @@ const taskSummary = computed(() => ({
   recursive: tasks.value.filter((item) => item.recursiveSubmodules).length,
   scheduled: tasks.value.filter((item) => item.triggerConfig.enableSchedule).length,
   running: tasks.value.filter((item) => item.lastExecutionStatus === 'running').length,
-  svnImports: tasks.value.filter((item) => item.taskType === 'svn_import').length,
 }))
 
 const taskDialogTitle = computed(() => (taskForm.id ? '编辑任务' : '新增任务'))
@@ -988,10 +987,6 @@ onBeforeUnmount(() => {
         <div class="stat-card">
           <strong>{{ taskSummary.running }}</strong>
           <span>正在执行</span>
-        </div>
-        <div class="stat-card">
-          <strong>{{ taskSummary.svnImports }}</strong>
-          <span>SVN 导入</span>
         </div>
       </div>
     </section>
