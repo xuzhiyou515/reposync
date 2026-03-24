@@ -239,16 +239,30 @@ func (c *Client) PushBranchesAndTags(ctx context.Context, repoPath string, targe
 		"-c", "credential.interactive=false",
 		"-c", "http.version=HTTP/1.1",
 		"push", "--progress", "--prune", "reposync-target",
-		"+refs/heads/*:refs/heads/*",
-		"+refs/tags/*:refs/tags/*",
+		"refs/heads/*:refs/heads/*",
+		"refs/tags/*:refs/tags/*",
 	}
 	if _, err := c.runWithEnv(ctx, repoPath, env, args...); err != nil {
-		return 0, err
+		return 0, wrapSVNPushError(err)
 	}
 	if _, err := c.run(ctx, repoPath, "remote", "remove", "reposync-target"); err != nil && !strings.Contains(err.Error(), "No such remote") {
 		return 0, err
 	}
 	return time.Since(started), nil
+}
+
+func wrapSVNPushError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if strings.Contains(message, "[rejected]") ||
+		strings.Contains(message, "non-fast-forward") ||
+		strings.Contains(message, "would clobber existing tag") ||
+		strings.Contains(message, "fetch first") {
+		return fmt.Errorf("svn_import target repository drift detected; target refs were modified and must be reconciled manually: %w", err)
+	}
+	return err
 }
 
 func (c *Client) ResolveHEAD(ctx context.Context, repoPath string) string {

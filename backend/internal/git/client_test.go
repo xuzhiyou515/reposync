@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -109,6 +110,27 @@ func TestPrepareSVNAuthorArgsFallsBackToAuthorsProg(t *testing.T) {
 	cleanup()
 	if _, statErr := os.Stat(progPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected authors prog to be removed, got %v", statErr)
+	}
+}
+
+func TestWrapSVNPushErrorMarksDrift(t *testing.T) {
+	err := wrapSVNPushError(errors.New("git push: [rejected] main -> main (non-fast-forward)"))
+	if err == nil {
+		t.Fatal("expected wrapped error")
+	}
+	if !strings.Contains(err.Error(), "drift detected") {
+		t.Fatalf("expected drift message, got %v", err)
+	}
+}
+
+func TestWrapSVNPushErrorLeavesOtherErrorsUntouched(t *testing.T) {
+	original := errors.New("git push: remote auth failed")
+	err := wrapSVNPushError(original)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != original.Error() {
+		t.Fatalf("expected original error to pass through, got %v", err)
 	}
 }
 

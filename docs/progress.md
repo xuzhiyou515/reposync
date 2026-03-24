@@ -175,3 +175,10 @@
 - Default author domain now falls back to the SVN source host name in the service layer, with storage-level fallback to `svn.local`.
 - Updated the management UI to explain the fallback behavior and allow overriding the default author domain.
 - Added tests covering `authors-file` vs `authors-prog` argument selection and default author domain behavior.
+
+## 2026-03-24 Incremental Update (4)
+
+### Phase 7: target drift protection
+- Changed `svn_import` target push semantics from force-update to normal branch/tag push so target refs must remain a read-only mirror.
+- Added drift-aware error wrapping for `svn_import`: non-fast-forward branch updates and tag collisions now surface as explicit target drift failures.
+- This aligns the implementation with the roadmap restriction that manually modified target Git repositories must fail instead of being auto-merged or overwritten.
