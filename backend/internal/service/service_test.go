@@ -17,10 +17,18 @@ import (
 )
 
 func TestBuildCacheKeyStable(t *testing.T) {
-	left := buildCacheKey("source", "target")
-	right := buildCacheKey("source", "target")
+	left := buildCacheKey(domain.TaskTypeGitMirror, "source", "target")
+	right := buildCacheKey(domain.TaskTypeGitMirror, "source", "target")
 	if left != right {
 		t.Fatalf("expected cache key to be stable")
+	}
+}
+
+func TestBuildCacheKeySeparatesTaskTypes(t *testing.T) {
+	gitMirrorKey := buildCacheKey(domain.TaskTypeGitMirror, "source", "target")
+	svnImportKey := buildCacheKey(domain.TaskTypeSVNImport, "source", "target")
+	if gitMirrorKey == svnImportKey {
+		t.Fatalf("expected cache keys to differ across task types")
 	}
 }
 

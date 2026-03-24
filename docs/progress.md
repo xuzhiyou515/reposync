@@ -182,3 +182,9 @@
 - Changed `svn_import` target push semantics from force-update to normal branch/tag push so target refs must remain a read-only mirror.
 - Added drift-aware error wrapping for `svn_import`: non-fast-forward branch updates and tag collisions now surface as explicit target drift failures.
 - This aligns the implementation with the roadmap restriction that manually modified target Git repositories must fail instead of being auto-merged or overwritten.
+
+## 2026-03-24 Incremental Update (5)
+
+### Phase 7: cache namespace isolation
+- Namespaced repository cache keys by task type so `git_mirror` and `svn_import` no longer collide when they point at the same source/target pair.
+- Added a service-layer regression test to lock in distinct cache keys for different task types.

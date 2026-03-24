@@ -292,8 +292,11 @@ func (s *Service) SubscribeExecution(ctx context.Context, executionID int64) (do
 	return detail, nil, func() {}, nil
 }
 
-func buildCacheKey(source, target string) string {
-	sum := sha1.Sum([]byte(source + "|" + target))
+func buildCacheKey(taskType domain.TaskType, source, target string) string {
+	if taskType == "" {
+		taskType = domain.TaskTypeGitMirror
+	}
+	sum := sha1.Sum([]byte(string(taskType) + "|" + source + "|" + target))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -579,7 +582,7 @@ func (s *Service) syncSVNRepository(ctx context.Context, gitClient *git.Client, 
 	}
 
 	now := time.Now().UTC()
-	cacheKey := buildCacheKey(task.SourceRepoURL, task.TargetRepoURL)
+	cacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL)
 	cacheRoot := resolveCacheBase(s.cacheDir, task.CacheBasePath)
 	cachePath := filepath.Join(cacheRoot, cacheKey)
 	_ = os.MkdirAll(cacheRoot, 0o755)
@@ -720,7 +723,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	logger.log(ctx, "Syncing %s from %s to %s", nodeLabel, sourceRepoURL, targetRepoURL)
 
 	now := time.Now().UTC()
-	cacheKey := buildCacheKey(sourceRepoURL, targetRepoURL)
+	cacheKey := buildCacheKey(task.TaskType, sourceRepoURL, targetRepoURL)
 	cacheRoot := resolveCacheBase(s.cacheDir, task.CacheBasePath)
 	cachePath := filepath.Join(cacheRoot, cacheKey+".git")
 	_ = os.MkdirAll(cacheRoot, 0o755)
