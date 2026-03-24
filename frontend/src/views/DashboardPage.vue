@@ -248,8 +248,10 @@ const selectedExecutionStats = computed(() => {
   if (!selectedExecution.value) {
     return []
   }
+  const task = selectedExecution.value.task
   const nodes = selectedExecution.value.nodes
-  return [
+  const stats = [
+    { label: '类型', value: taskTypeLabel(task) },
     { label: '触发', value: String(selectedExecution.value.execution.triggerType) },
     { label: '仓库', value: String(selectedExecution.value.execution.repoCount) },
     { label: '建仓', value: String(selectedExecution.value.execution.createdRepoCount) },
@@ -257,6 +259,49 @@ const selectedExecutionStats = computed(() => {
     { label: '总节点', value: String(nodes.length) },
     { label: '失败节点', value: String(nodes.filter((node) => node.status === 'failed').length) },
   ]
+  if (task.taskType === 'svn_import') {
+    stats.push(
+      {
+        label: 'SVN 布局',
+        value: `${task.svnConfig.trunkPath || 'trunk'} / ${task.svnConfig.branchesPath || 'branches'} / ${task.svnConfig.tagsPath || 'tags'}`,
+      },
+      {
+        label: '作者映射',
+        value: task.svnConfig.authorsFilePath ? 'authors.txt' : `自动映射 @${task.svnConfig.authorDomain || 'svn.local'}`,
+      },
+    )
+  }
+  return stats
+})
+
+const selectedExecutionConfigRows = computed(() => {
+  if (!selectedExecution.value) {
+    return []
+  }
+  const task = selectedExecution.value.task
+  const rows = [
+    { label: '任务类型', value: taskTypeLabel(task) },
+    { label: '源地址', value: task.sourceRepoUrl },
+    { label: '目标地址', value: task.targetRepoUrl },
+    { label: '缓存目录', value: task.cacheBasePath || '(默认缓存目录)' },
+  ]
+  if (task.taskType === 'svn_import') {
+    rows.push(
+      { label: 'Trunk', value: task.svnConfig.trunkPath || 'trunk' },
+      { label: 'Branches', value: task.svnConfig.branchesPath || 'branches' },
+      { label: 'Tags', value: task.svnConfig.tagsPath || 'tags' },
+      {
+        label: '作者映射',
+        value: task.svnConfig.authorsFilePath || `自动映射到 ${task.svnConfig.authorDomain || 'svn.local'}`,
+      },
+    )
+  } else {
+    rows.push(
+      { label: '同步模式', value: task.recursiveSubmodules ? '递归子模块' : '单仓库镜像' },
+      { label: '镜像范围', value: task.syncAllRefs ? '全部 refs' : '自定义' },
+    )
+  }
+  return rows
 })
 
 const selectedExecutionNode = computed(() => {
@@ -1221,6 +1266,18 @@ onBeforeUnmount(() => {
           <div v-for="item in selectedExecutionStats" :key="item.label" class="status-card">
             <span>{{ item.label }}</span>
             <strong>{{ item.value }}</strong>
+          </div>
+        </div>
+
+        <div class="detail-block">
+          <div class="panel-header">
+            <strong>执行配置</strong>
+          </div>
+          <div class="node-detail-grid">
+            <div v-for="item in selectedExecutionConfigRows" :key="item.label" class="node-detail-item">
+              <span>{{ item.label }}</span>
+              <strong class="mono">{{ item.value }}</strong>
+            </div>
           </div>
         </div>
 

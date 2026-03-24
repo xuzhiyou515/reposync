@@ -188,3 +188,9 @@
 ### Phase 7: cache namespace isolation
 - Namespaced repository cache keys by task type so `git_mirror` and `svn_import` no longer collide when they point at the same source/target pair.
 - Added a service-layer regression test to lock in distinct cache keys for different task types.
+
+## 2026-03-24 Incremental Update (6)
+
+### Phase 7: execution observability
+- Enhanced execution detail UI so `svn_import` runs now surface task type, SVN layout, and author mapping mode directly in the management console.
+- Added a dedicated execution configuration panel so operators can inspect the source/target pair, cache location, and task-specific sync settings without reading raw logs.
