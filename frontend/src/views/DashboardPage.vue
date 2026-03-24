@@ -94,7 +94,54 @@ const taskTypeOptions: Array<{ label: string; value: TaskType }> = [
   { label: 'Git Mirror', value: 'git_mirror' },
   { label: 'SVN Import', value: 'svn_import' },
 ]
+const credentialTypeOptions: Array<{ label: string; value: Credential['type'] }> = [
+  { label: 'SVN / Git HTTP 用户名密码', value: 'https_token' },
+  { label: '平台 API Token', value: 'api_token' },
+  { label: 'Git SSH 私钥', value: 'ssh_key' },
+]
 const taskFormIsSVNImport = computed(() => taskForm.taskType === 'svn_import')
+const credentialTypeLabelMap: Record<NonNullable<Credential['type']>, string> = {
+  https_token: 'SVN / Git HTTP 用户名密码',
+  api_token: '平台 API Token',
+  ssh_key: 'Git SSH 私钥',
+}
+const selectedCredentialTypeMeta = computed(() => {
+  switch (credentialForm.type) {
+    case 'https_token':
+      return {
+        title: 'HTTP 用户名密码',
+        description: '用于 SVN Import 的源仓库认证，或 Git HTTP/HTTPS 仓库访问。',
+        usernameLabel: '用户名',
+        usernamePlaceholder: '例如：svn-user',
+        secretLabel: '密码',
+        secretPlaceholder: '输入 SVN 或 Git HTTP 密码',
+        secretRows: 4,
+        usernameHelp: 'SVN Import 绑定这类凭证时，必须同时填写用户名和密码。',
+      }
+    case 'ssh_key':
+      return {
+        title: 'SSH 私钥',
+        description: '用于通过 SSH 访问 Git 仓库。适用于 Git mirror，不适用于 SVN Import 源仓库。',
+        usernameLabel: 'SSH 用户',
+        usernamePlaceholder: '默认可留空，常见为 git',
+        secretLabel: '私钥内容',
+        secretPlaceholder: '粘贴完整的 OpenSSH 私钥内容',
+        secretRows: 8,
+        usernameHelp: '可选；多数 Git 服务默认使用 git 用户。',
+      }
+    default:
+      return {
+        title: 'API Token',
+        description: '用于 GitHub、Gogs 等平台 API 调用，例如自动建仓、校验仓库是否存在。',
+        usernameLabel: '用户名/账号',
+        usernamePlaceholder: '可选，例如平台账号名',
+        secretLabel: 'Token',
+        secretPlaceholder: '输入平台 API Token',
+        secretRows: 4,
+        usernameHelp: '通常可留空；如平台需要账号名，可在这里填写。',
+      }
+  }
+})
 
 const repositoryValueValidator = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   const trimmed = value?.trim()
@@ -1085,7 +1132,11 @@ onBeforeUnmount(() => {
             </template>
             <el-table :data="credentials" height="620">
               <el-table-column prop="name" label="名称" min-width="180" />
-              <el-table-column prop="type" label="类型" width="140" />
+              <el-table-column label="类型" width="200">
+                <template #default="{ row }">
+                  {{ credentialTypeLabelMap[row.type] || row.type }}
+                </template>
+              </el-table-column>
               <el-table-column prop="scope" label="用途" min-width="180" />
               <el-table-column prop="secretMasked" label="脱敏值" min-width="160" />
               <el-table-column label="操作" width="180">
@@ -1566,42 +1617,55 @@ onBeforeUnmount(() => {
       <el-form label-position="top" class="dialog-form">
         <section class="form-section">
           <div class="form-section-header">
+            <strong>凭证类型</strong>
+            <span>先选择认证方式，下面的输入项会按类型自动切换。</span>
+          </div>
+          <div class="form-section-body">
+            <el-form-item label="类型">
+              <el-segmented v-model="credentialForm.type" :options="credentialTypeOptions" />
+            </el-form-item>
+            <div class="task-trigger-preview">
+              <div class="panel-header">
+                <strong>{{ selectedCredentialTypeMeta.title }}</strong>
+                <span class="muted-text">{{ selectedCredentialTypeMeta.description }}</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="form-section-header">
             <strong>基本信息</strong>
-            <span>定义凭证名称、类型和用途范围。</span>
+            <span>填写凭证名称和用途说明，方便在任务里快速识别。</span>
           </div>
           <div class="form-section-body">
             <el-form-item label="名称">
               <el-input v-model="credentialForm.name" />
             </el-form-item>
             <div class="two-column form-grid-wide">
-              <el-form-item label="类型">
-                <el-select v-model="credentialForm.type">
-                  <el-option label="API Token" value="api_token" />
-                  <el-option label="HTTPS Token" value="https_token" />
-                  <el-option label="SSH Key" value="ssh_key" />
-                </el-select>
+              <el-form-item :label="selectedCredentialTypeMeta.usernameLabel">
+                <el-input v-model="credentialForm.username" :placeholder="selectedCredentialTypeMeta.usernamePlaceholder" />
+                <div class="field-help">{{ selectedCredentialTypeMeta.usernameHelp }}</div>
               </el-form-item>
-              <el-form-item label="用户名">
-                <el-input v-model="credentialForm.username" />
+              <el-form-item label="用途">
+                <el-input v-model="credentialForm.scope" placeholder="例如：SVN 源仓库读取 / GitHub 自动建仓" />
               </el-form-item>
             </div>
-            <el-form-item label="用途">
-              <el-input v-model="credentialForm.scope" />
-            </el-form-item>
           </div>
         </section>
 
         <section class="form-section">
           <div class="form-section-header">
-            <strong>密钥内容</strong>
-            <span>按当前凭证类型填写 Token 或 SSH 私钥内容。</span>
+            <strong>认证内容</strong>
+            <span>根据上面选择的类型，填写密码、Token 或 SSH 私钥。</span>
           </div>
           <div class="form-section-body">
-            <el-form-item label="Secret">
+            <el-form-item :label="selectedCredentialTypeMeta.secretLabel">
               <el-input
                 v-model="credentialForm.secret"
                 type="textarea"
-                :rows="6"
+                :rows="selectedCredentialTypeMeta.secretRows"
+                :placeholder="selectedCredentialTypeMeta.secretPlaceholder"
                 @focus="prepareCredentialSecretEdit"
                 @input="onCredentialSecretInput"
               />
