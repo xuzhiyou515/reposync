@@ -62,7 +62,7 @@ func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
 		BranchesPath:    "proj/branches",
 		TagsPath:        "proj/tags",
 		AuthorsFilePath: "D:/authors.txt",
-	}, []string{"--authors-file=D:/authors.txt"})
+	}, []string{"--username=svn-user"}, []string{"--authors-file=D:/authors.txt"})
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
 		"svn clone",
@@ -70,11 +70,51 @@ func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
 		"--trunk=proj/trunk",
 		"--branches=proj/branches",
 		"--tags=proj/tags",
+		"--username=svn-user",
 		"--authors-file=D:/authors.txt",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected args to contain %q, got %s", expected, joined)
 		}
+	}
+}
+
+func TestPrepareSVNAuthInjectsUsernameAndPassword(t *testing.T) {
+	authURL, env, args, cleanup, err := prepareSVNAuth("https://svn.example.com/repos/demo", &domain.Credential{
+		Type:     domain.CredentialTypeHTTPSToken,
+		Username: "svn-user",
+		Secret:   "svn-pass",
+	})
+	if err != nil {
+		t.Fatalf("prepare svn auth: %v", err)
+	}
+	defer cleanup()
+
+	if len(env) != 0 {
+		t.Fatalf("expected no env overrides, got %v", env)
+	}
+	if len(args) != 1 || args[0] != "--username=svn-user" {
+		t.Fatalf("expected svn username arg, got %v", args)
+	}
+	if !strings.Contains(authURL, "svn-user:svn-pass@") {
+		t.Fatalf("expected password embedded in auth url, got %s", authURL)
+	}
+}
+
+func TestPrepareSVNAuthRejectsMissingUsernameOrPassword(t *testing.T) {
+	_, _, _, cleanup, err := prepareSVNAuth("https://svn.example.com/repos/demo", &domain.Credential{
+		Type:     domain.CredentialTypeHTTPSToken,
+		Username: "svn-user",
+		Secret:   "",
+	})
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil {
+		t.Fatal("expected svn auth preparation to fail")
+	}
+	if !strings.Contains(err.Error(), "username and password") {
+		t.Fatalf("expected explicit auth error, got %v", err)
 	}
 }
 

@@ -91,6 +91,12 @@ func (s *Service) validateTask(ctx context.Context, task domain.SyncTask) error 
 		}
 		return fmt.Errorf("sourceRepoUrl uses http/https, sourceCredentialId cannot reference ssh_key")
 	}
+	if task.TaskType == domain.TaskTypeSVNImport && sourceCredential != nil {
+		if (sourceCredential.Type == domain.CredentialTypeHTTPSToken || sourceCredential.Type == domain.CredentialTypeAPIToken) &&
+			(strings.TrimSpace(sourceCredential.Username) == "" || strings.TrimSpace(sourceCredential.Secret) == "") {
+			return fmt.Errorf("svn_import source credentials must include both username and password")
+		}
+	}
 	return nil
 }
 

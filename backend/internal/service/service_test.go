@@ -236,6 +236,45 @@ func TestSaveTaskRejectsWebhookForSVNImport(t *testing.T) {
 	}
 }
 
+func TestSaveTaskRejectsSVNImportCredentialWithoutUsernameAndPassword(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	credential, err := svc.SaveCredential(context.Background(), domain.Credential{
+		Name:   "svn-http",
+		Type:   domain.CredentialTypeHTTPSToken,
+		Secret: "",
+	})
+	if err != nil {
+		t.Fatalf("save credential: %v", err)
+	}
+
+	_, err = svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:           domain.TaskTypeSVNImport,
+		Name:               "svn-http-auth",
+		SourceRepoURL:      "https://svn.example.com/repos/project",
+		TargetRepoURL:      "https://target.example.com/org/repo.git",
+		SourceCredentialID: &credential.ID,
+		Enabled:            true,
+		SyncAllRefs:        true,
+		ProviderConfig:     domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err == nil {
+		t.Fatal("expected save task to fail for incomplete svn credentials")
+	}
+	if !strings.Contains(err.Error(), "username and password") {
+		t.Fatalf("expected explicit svn auth validation error, got %v", err)
+	}
+}
+
 func TestSaveTaskDefaultsSVNLayoutPaths(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "reposync.db")

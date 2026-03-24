@@ -136,7 +136,7 @@ func (c *Client) MirrorPush(ctx context.Context, cachePath string, targetURL str
 func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cachePath string, svnConfig domain.SVNConfig, credential *domain.Credential) (bool, time.Duration, error) {
 	started := time.Now()
 	cacheHit := isGitWorktree(cachePath)
-	authURL, env, cleanup, err := prepareGitAuth(sourceURL, credential)
+	authURL, env, svnAuthArgs, cleanup, err := prepareSVNAuth(sourceURL, credential)
 	if err != nil {
 		return cacheHit, 0, err
 	}
@@ -159,7 +159,7 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 			return false, 0, err
 		}
-		args := buildSVNCloneArgs(authURL, cachePath, svnConfig, authorArgs)
+		args := buildSVNCloneArgs(authURL, cachePath, svnConfig, svnAuthArgs, authorArgs)
 		if _, err := c.runWithEnv(ctx, "", env, args...); err != nil {
 			return false, 0, err
 		}
@@ -180,7 +180,7 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 			_, _ = c.run(context.Background(), cachePath, "config", "svn-remote.svn.url", restoreURL)
 		}()
 	}
-	if _, err := c.runWithEnv(ctx, cachePath, env, buildSVNFetchArgs(authorArgs)...); err != nil {
+	if _, err := c.runWithEnv(ctx, cachePath, env, buildSVNFetchArgs(svnAuthArgs, authorArgs)...); err != nil {
 		return true, 0, err
 	}
 	return true, time.Since(started), nil
@@ -559,7 +559,7 @@ func (c *Client) listRefs(ctx context.Context, repoPath string, refPrefix string
 	return refs, nil
 }
 
-func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNConfig, authorArgs []string) []string {
+func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNConfig, authArgs []string, authorArgs []string) []string {
 	args := []string{
 		"svn", "clone", sourceURL, cachePath,
 		"--prefix=svn/",
@@ -567,14 +567,40 @@ func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNC
 		"--branches=" + defaultSVNLayoutPath(svnConfig.BranchesPath, "branches"),
 		"--tags=" + defaultSVNLayoutPath(svnConfig.TagsPath, "tags"),
 	}
+	args = append(args, authArgs...)
 	args = append(args, authorArgs...)
 	return args
 }
 
-func buildSVNFetchArgs(authorArgs []string) []string {
+func buildSVNFetchArgs(authArgs []string, authorArgs []string) []string {
 	args := []string{"svn", "fetch"}
+	args = append(args, authArgs...)
 	args = append(args, authorArgs...)
 	return args
+}
+
+func prepareSVNAuth(rawURL string, credential *domain.Credential) (string, []string, []string, func(), error) {
+	if credential == nil {
+		return rawURL, nil, nil, func() {}, nil
+	}
+	switch credential.Type {
+	case domain.CredentialTypeHTTPSToken, domain.CredentialTypeAPIToken:
+		parsed, err := url.Parse(strings.TrimSpace(rawURL))
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return rawURL, nil, nil, func() {}, nil
+		}
+		username := strings.TrimSpace(credential.Username)
+		password := strings.TrimSpace(credential.Secret)
+		if username == "" || password == "" {
+			return "", nil, nil, nil, fmt.Errorf("svn http auth requires both username and password")
+		}
+		parsed.User = url.UserPassword(username, password)
+		return parsed.String(), nil, []string{"--username=" + username}, func() {}, nil
+	case domain.CredentialTypeSSHKey:
+		return "", nil, nil, nil, fmt.Errorf("svn_import does not support ssh_key credentials")
+	default:
+		return rawURL, nil, nil, func() {}, nil
+	}
 }
 
 func prepareSVNAuthorArgs(svnConfig domain.SVNConfig) ([]string, func(), error) {

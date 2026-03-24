@@ -200,3 +200,11 @@
 ### Phase 7: real end-to-end regression harness
 - Added an opt-in `svn_import` end-to-end integration test in the service layer that runs against a real HTTP/HTTPS SVN repository when `REPOSYNC_E2E_SVN_*` environment variables are provided.
 - The harness covers the full flow from `svn_import` task execution to target Git repository verification, while still skipping cleanly in environments that do not provide external SVN fixtures.
+
+## 2026-03-24 Incremental Update (8)
+
+### Phase 7: SVN username/password authentication
+- Added explicit `svn_import` support for HTTP/HTTPS username-password authentication.
+- `git svn` execution now passes `--username` and injects the password into the authenticated source URL instead of relying on implicit prompting.
+- Added validation so SVN source credentials must include both username and password when a credential is attached.
+- Added Git client and service tests covering SVN auth argument generation and validation behavior.
