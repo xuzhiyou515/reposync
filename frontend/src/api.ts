@@ -38,6 +38,8 @@ export const api = {
     await http.delete(`/credentials/${id}`)
   },
   listCaches: async () => (await http.get<RepoCache[]>('/caches')).data,
+  moveCache: async (id: number, cachePath: string) =>
+    (await http.post<RepoCache>(`/caches/${id}/move`, { cachePath })).data,
   cleanupCache: async (id: number) => {
     await http.post(`/caches/${id}/cleanup`)
   },

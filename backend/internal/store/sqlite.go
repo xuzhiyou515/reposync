@@ -140,6 +140,12 @@ CREATE TABLE IF NOT EXISTS repo_caches (
   health_status TEXT NOT NULL DEFAULT 'ready',
   last_error_message TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS cache_task_links (
+  cache_key TEXT NOT NULL,
+  task_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (cache_key, task_id)
+);
 CREATE TABLE IF NOT EXISTS webhook_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL,
@@ -668,14 +674,60 @@ ON CONFLICT(cache_key) DO UPDATE SET
 	return err
 }
 
+func (s *Store) LinkCacheToTask(ctx context.Context, cacheKey string, taskID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO cache_task_links (cache_key, task_id, created_at)
+VALUES (?, ?, ?)
+ON CONFLICT(cache_key, task_id) DO NOTHING`,
+		cacheKey, taskID, timeString(time.Now().UTC()),
+	)
+	return err
+}
+
+func (s *Store) ListCacheTaskIDs(ctx context.Context, cacheKey string) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT task_id
+FROM cache_task_links
+WHERE cache_key = ?
+ORDER BY task_id`, cacheKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []int64
+	for rows.Next() {
+		var taskID int64
+		if err := rows.Scan(&taskID); err != nil {
+			return nil, err
+		}
+		result = append(result, taskID)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) GetCacheByKey(ctx context.Context, cacheKey string) (domain.RepoCache, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, cache_key, source_repo_url, auth_context, cache_path, last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message
+SELECT id, cache_key, source_repo_url, auth_context, cache_path,
+  COALESCE((SELECT COUNT(*) FROM cache_task_links ctl WHERE ctl.cache_key = repo_caches.cache_key), 0),
+  last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message
 FROM repo_caches WHERE cache_key = ?`, cacheKey)
+	return scanCache(row)
+}
+
+func (s *Store) GetCache(ctx context.Context, id int64) (domain.RepoCache, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, cache_key, source_repo_url, auth_context, cache_path,
+  COALESCE((SELECT COUNT(*) FROM cache_task_links ctl WHERE ctl.cache_key = repo_caches.cache_key), 0),
+  last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message
+FROM repo_caches WHERE id = ?`, id)
+	return scanCache(row)
+}
+
+func scanCache(row scanner) (domain.RepoCache, error) {
 	var item domain.RepoCache
 	var lastFetch sql.NullString
 	var lastUsed sql.NullString
-	if err := row.Scan(&item.ID, &item.CacheKey, &item.SourceRepoURL, &item.AuthContext, &item.CachePath, &lastFetch, &lastUsed, &item.HitCount, &item.SizeBytes, &item.HealthStatus, &item.LastErrorMessage); err != nil {
+	if err := row.Scan(&item.ID, &item.CacheKey, &item.SourceRepoURL, &item.AuthContext, &item.CachePath, &item.LinkedTaskCount, &lastFetch, &lastUsed, &item.HitCount, &item.SizeBytes, &item.HealthStatus, &item.LastErrorMessage); err != nil {
 		return item, err
 	}
 	item.LastFetchAt = parseNullableTime(lastFetch)
@@ -685,7 +737,9 @@ FROM repo_caches WHERE cache_key = ?`, cacheKey)
 
 func (s *Store) ListCaches(ctx context.Context) ([]domain.RepoCache, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, cache_key, source_repo_url, auth_context, cache_path, last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message
+SELECT id, cache_key, source_repo_url, auth_context, cache_path,
+  COALESCE((SELECT COUNT(*) FROM cache_task_links ctl WHERE ctl.cache_key = repo_caches.cache_key), 0),
+  last_fetch_at, last_used_at, hit_count, size_bytes, health_status, last_error_message
 FROM repo_caches ORDER BY last_used_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
@@ -695,7 +749,7 @@ FROM repo_caches ORDER BY last_used_at DESC, id DESC`)
 	for rows.Next() {
 		var item domain.RepoCache
 		var lastFetch, lastUsed sql.NullString
-		if err := rows.Scan(&item.ID, &item.CacheKey, &item.SourceRepoURL, &item.AuthContext, &item.CachePath, &lastFetch, &lastUsed, &item.HitCount, &item.SizeBytes, &item.HealthStatus, &item.LastErrorMessage); err != nil {
+		if err := rows.Scan(&item.ID, &item.CacheKey, &item.SourceRepoURL, &item.AuthContext, &item.CachePath, &item.LinkedTaskCount, &lastFetch, &lastUsed, &item.HitCount, &item.SizeBytes, &item.HealthStatus, &item.LastErrorMessage); err != nil {
 			return nil, err
 		}
 		item.LastFetchAt = parseNullableTime(lastFetch)
@@ -706,6 +760,11 @@ FROM repo_caches ORDER BY last_used_at DESC, id DESC`)
 }
 
 func (s *Store) DeleteCache(ctx context.Context, id int64) error {
+	cache, err := s.GetCache(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM cache_task_links WHERE cache_key = ?`, cache.CacheKey)
 	result, err := s.db.ExecContext(ctx, `DELETE FROM repo_caches WHERE id = ?`, id)
 	if err != nil {
 		return err

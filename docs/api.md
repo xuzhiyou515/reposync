@@ -82,6 +82,31 @@
 
 基于一条历史 Webhook 记录重新触发一次同步。
 
+## 2. 缓存接口
+
+### `GET /api/caches`
+
+返回缓存列表。
+
+返回项补充说明：
+- `linkedTaskCount`：当前关联到该缓存的任务数量。
+
+### `POST /api/caches/:id/move`
+
+迁移缓存目录，并更新缓存记录中的 `cachePath`。任务后续执行会继续复用迁移后的目录。
+
+请求示例：
+
+```json
+{
+  "cachePath": "D:/Repos/cache/migrated/abcdef.git"
+}
+```
+
+### `POST /api/caches/:id/cleanup`
+
+清理指定缓存，同时删除缓存记录。
+
 
 ## 8. SVN 到 Git 任务规划
 

@@ -126,6 +126,7 @@
 | `sourceRepoUrl` | string | 源仓库地址 |
 | `authContext` | string | 认证上下文摘要 |
 | `cachePath` | string | 本地缓存路径 |
+| `linkedTaskCount` | integer | 当前关联到该缓存的任务数量 |
 | `lastFetchAt` | datetime nullable | 最近一次 fetch 时间 |
 | `lastUsedAt` | datetime nullable | 最近一次使用时间 |
 | `hitCount` | integer | 命中次数 |
@@ -133,7 +134,22 @@
 | `healthStatus` | string | `ready` / `broken` 等 |
 | `lastErrorMessage` | string | 最近一次错误 |
 
-## 6. WebhookEvent
+补充说明：
+- `RepoCache` 本身不直接保存单个 `taskId`，而是通过独立关联表维护与任务的多对多关系。
+- 同一个子模块缓存可以被多个同步任务复用。
+- 迁移缓存目录时只更新缓存记录中的 `cachePath`，后续任务执行会优先复用数据库里的已迁移路径。
+
+## 6. CacheTaskLink
+
+用于描述缓存与任务之间的多对多关系。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `cacheKey` | string | 关联的缓存键 |
+| `taskId` | integer | 关联的任务 ID |
+| `createdAt` | datetime | 建立关联时间 |
+
+## 7. WebhookEvent
 
 记录 Webhook 历史。
 
@@ -149,7 +165,7 @@
 | `executionId` | integer nullable | 关联执行 |
 | `createdAt` | datetime | 记录时间 |
 
-## 7. 任务调度补充字段
+## 8. 任务调度补充字段
 
 任务列表接口会直接返回调度摘要字段，前端不再单独查询调度状态接口。
 
@@ -159,7 +175,7 @@
 | `nextRunAt` | datetime nullable | 当前任务下一次计划执行时间；未启用时为空 |
 
 
-## 9. SVNImport 扩展字段
+## 10. SVNImport 扩展字段
 
 后续 `svn_import` 任务会在 `SyncTask` 基础上增加 SVN 专用配置，用于描述 SVN 仓库到 Git 目标仓库的持续同步任务。
 

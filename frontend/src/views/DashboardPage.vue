@@ -810,6 +810,16 @@ const cleanupCache = async (cache: RepoCache) => {
   await loadCaches()
 }
 
+const moveCache = async (cache: RepoCache) => {
+  const nextPath = window.prompt('请输入新的缓存目录路径', cache.cachePath)
+  if (!nextPath || nextPath.trim() === '' || nextPath.trim() === cache.cachePath) {
+    return
+  }
+  await api.moveCache(cache.id, nextPath.trim())
+  ElMessage.success('缓存目录已迁移')
+  await loadCaches()
+}
+
 const replayWebhookEvent = async (event: WebhookEvent) => {
   if (executionTaskId.value == null) {
     return
@@ -1175,15 +1185,17 @@ onBeforeUnmount(() => {
           <el-table :data="caches" height="620">
             <el-table-column prop="sourceRepoUrl" label="源仓库" min-width="280" />
             <el-table-column prop="cachePath" label="缓存路径" min-width="260" />
+            <el-table-column prop="linkedTaskCount" label="关联任务数" width="110" sortable />
             <el-table-column prop="healthStatus" label="健康状态" width="120" />
             <el-table-column prop="hitCount" label="命中次数" width="100" />
-            <el-table-column label="占用空间" width="120">
+            <el-table-column prop="sizeBytes" label="占用空间" width="120" sortable>
               <template #default="{ row }">
                 {{ formatBytes(row.sizeBytes) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120">
+            <el-table-column label="操作" width="200">
               <template #default="{ row }">
+                <el-button size="small" @click="moveCache(row)">迁移</el-button>
                 <el-button size="small" type="danger" @click="cleanupCache(row)">清理</el-button>
               </template>
             </el-table-column>

@@ -177,3 +177,45 @@ func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
 		t.Fatalf("expected author domain to round trip, got %q", task.SVNConfig.AuthorDomain)
 	}
 }
+
+func TestCacheRoundTripWithTaskLink(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reposync.db")
+	db, err := New(dbPath, security.NewSecretBox("test-secret"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	taskID := int64(7)
+	anotherTaskID := int64(8)
+	if err := db.UpsertCache(ctx, domain.RepoCache{
+		CacheKey:      "cache-key",
+		SourceRepoURL: "src",
+		AuthContext:   "managed",
+		CachePath:     "/tmp/cache-key.git",
+		HitCount:      3,
+		SizeBytes:     42,
+		HealthStatus:  "ready",
+	}); err != nil {
+		t.Fatalf("upsert cache: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, "cache-key", taskID); err != nil {
+		t.Fatalf("link cache to task: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, "cache-key", anotherTaskID); err != nil {
+		t.Fatalf("link cache to another task: %v", err)
+	}
+
+	item, err := db.GetCacheByKey(ctx, "cache-key")
+	if err != nil {
+		t.Fatalf("get cache by key: %v", err)
+	}
+	links, err := db.ListCacheTaskIDs(ctx, item.CacheKey)
+	if err != nil {
+		t.Fatalf("list cache task ids: %v", err)
+	}
+	if len(links) != 2 || links[0] != taskID || links[1] != anotherTaskID {
+		t.Fatalf("expected task link to round trip, got %+v", links)
+	}
+}

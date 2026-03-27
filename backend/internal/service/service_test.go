@@ -441,6 +441,13 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if len(caches) != 1 {
 		t.Fatalf("expected 1 cache, got %d", len(caches))
 	}
+	links, err := db.ListCacheTaskIDs(context.Background(), caches[0].CacheKey)
+	if err != nil {
+		t.Fatalf("list cache links: %v", err)
+	}
+	if len(links) != 1 || links[0] != task.ID {
+		t.Fatalf("expected cache to link to task %d, got %+v", task.ID, links)
+	}
 	if caches[0].HitCount < 2 {
 		t.Fatalf("expected cache hit count >= 2, got %d", caches[0].HitCount)
 	}
@@ -466,6 +473,104 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	}
 	if !strings.Contains(detail.Execution.SummaryLog, "git exec: fetch --progress --prune origin +refs/*:refs/*") {
 		t.Fatalf("expected execution summary log to include raw git command output, got:\n%s", detail.Execution.SummaryLog)
+	}
+}
+
+func TestMoveCacheReusesMigratedPath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for integration test")
+	}
+
+	root := t.TempDir()
+	sourceBare := filepath.Join(root, "source.git")
+	targetBare := filepath.Join(root, "target.git")
+	worktree := filepath.Join(root, "work")
+	dbPath := filepath.Join(root, "reposync.db")
+	cacheDir := filepath.Join(root, "cache")
+
+	runGit(t, "", "init", "--bare", sourceBare)
+	runGit(t, "", "init", "--bare", targetBare)
+	runGit(t, "", "clone", sourceBare, worktree)
+	runGit(t, worktree, "config", "user.name", "RepoSync Test")
+	runGit(t, worktree, "config", "user.email", "reposync@example.com")
+	runGit(t, worktree, "checkout", "-b", "main")
+	writeFile(t, filepath.Join(worktree, "README.md"), "main\n")
+	runGit(t, worktree, "add", ".")
+	runGit(t, worktree, "commit", "-m", "init")
+	runGit(t, worktree, "push", "-u", "origin", "main")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, cacheDir, gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                "move-cache",
+		SourceRepoURL:       sourceBare,
+		TargetRepoURL:       targetBare,
+		Enabled:             true,
+		RecursiveSubmodules: false,
+		SyncAllRefs:         true,
+		ProviderConfig:      domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+
+	first, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	first = waitForExecutionCompletion(t, svc, first.ID)
+	if first.Status != domain.ExecutionStatusSuccess {
+		t.Fatalf("expected first execution success, got %s", first.Status)
+	}
+
+	caches, err := svc.ListCaches(context.Background())
+	if err != nil {
+		t.Fatalf("list caches: %v", err)
+	}
+	if len(caches) != 1 {
+		t.Fatalf("expected 1 cache, got %d", len(caches))
+	}
+	oldPath := caches[0].CachePath
+	newPath := filepath.Join(root, "migrated-cache", filepath.Base(oldPath))
+
+	moved, err := svc.MoveCache(context.Background(), caches[0].ID, newPath)
+	if err != nil {
+		t.Fatalf("move cache: %v", err)
+	}
+	if moved.CachePath != newPath {
+		t.Fatalf("expected moved cache path %s, got %s", newPath, moved.CachePath)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("expected migrated cache at %s: %v", newPath, err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old cache path to be gone, got err=%v", err)
+	}
+
+	second, err := svc.RunTask(context.Background(), task.ID, domain.TriggerManual)
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	second = waitForExecutionCompletion(t, svc, second.ID)
+	if second.Status != domain.ExecutionStatusSuccess {
+		t.Fatalf("expected second execution success, got %s", second.Status)
+	}
+
+	caches, err = svc.ListCaches(context.Background())
+	if err != nil {
+		t.Fatalf("list caches after move: %v", err)
+	}
+	if caches[0].CachePath != newPath {
+		t.Fatalf("expected cache path to remain migrated path %s, got %s", newPath, caches[0].CachePath)
+	}
+	if caches[0].HitCount < 2 {
+		t.Fatalf("expected migrated cache hit count >= 2, got %d", caches[0].HitCount)
 	}
 }
 

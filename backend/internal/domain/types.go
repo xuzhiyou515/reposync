@@ -160,12 +160,17 @@ type RepoCache struct {
 	SourceRepoURL    string     `json:"sourceRepoUrl"`
 	AuthContext      string     `json:"authContext"`
 	CachePath        string     `json:"cachePath"`
+	LinkedTaskCount  int        `json:"linkedTaskCount"`
 	LastFetchAt      *time.Time `json:"lastFetchAt,omitempty"`
 	LastUsedAt       *time.Time `json:"lastUsedAt,omitempty"`
 	HitCount         int        `json:"hitCount"`
 	SizeBytes        int64      `json:"sizeBytes"`
 	HealthStatus     string     `json:"healthStatus"`
 	LastErrorMessage string     `json:"lastErrorMessage,omitempty"`
+}
+
+type CacheMoveRequest struct {
+	CachePath string `json:"cachePath"`
 }
 
 type ExecutionDetail struct {

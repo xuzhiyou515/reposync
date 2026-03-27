@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -162,19 +163,71 @@ func (s *Service) ListCaches(ctx context.Context) ([]domain.RepoCache, error) {
 }
 
 func (s *Service) CleanupCache(ctx context.Context, id int64) error {
-	caches, err := s.store.ListCaches(ctx)
+	cache, err := s.store.GetCache(ctx, id)
 	if err != nil {
 		return err
 	}
-	for _, cache := range caches {
-		if cache.ID == id {
-			if cache.CachePath != "" {
-				_ = os.RemoveAll(cache.CachePath)
-			}
-			return s.store.DeleteCache(ctx, id)
-		}
+	if cache.CachePath != "" {
+		_ = os.RemoveAll(cache.CachePath)
 	}
-	return fmt.Errorf("cache not found")
+	return s.store.DeleteCache(ctx, id)
+}
+
+func (s *Service) MoveCache(ctx context.Context, id int64, targetPath string) (domain.RepoCache, error) {
+	cache, err := s.store.GetCache(ctx, id)
+	if err != nil {
+		return domain.RepoCache{}, err
+	}
+	sourcePath := filepath.Clean(strings.TrimSpace(cache.CachePath))
+	if sourcePath == "" {
+		return domain.RepoCache{}, fmt.Errorf("cache path is empty")
+	}
+	destinationPath := filepath.Clean(strings.TrimSpace(targetPath))
+	if destinationPath == "" {
+		return domain.RepoCache{}, fmt.Errorf("cachePath is required")
+	}
+	if sourcePath == destinationPath {
+		return cache, nil
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return domain.RepoCache{}, fmt.Errorf("source cache path does not exist")
+		}
+		return domain.RepoCache{}, err
+	}
+	if !info.IsDir() {
+		return domain.RepoCache{}, fmt.Errorf("source cache path is not a directory")
+	}
+	if existing, statErr := os.Stat(destinationPath); statErr == nil {
+		if existing.IsDir() {
+			entries, readErr := os.ReadDir(destinationPath)
+			if readErr != nil {
+				return domain.RepoCache{}, readErr
+			}
+			if len(entries) > 0 {
+				return domain.RepoCache{}, fmt.Errorf("destination cache path already exists and is not empty")
+			}
+		} else {
+			return domain.RepoCache{}, fmt.Errorf("destination cache path already exists")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return domain.RepoCache{}, statErr
+	}
+	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+		return domain.RepoCache{}, err
+	}
+	if err := os.Rename(sourcePath, destinationPath); err != nil {
+		return domain.RepoCache{}, err
+	}
+	now := time.Now().UTC()
+	cache.CachePath = destinationPath
+	cache.LastUsedAt = &now
+	if err := s.store.UpsertCache(ctx, cache); err != nil {
+		_ = os.Rename(destinationPath, sourcePath)
+		return domain.RepoCache{}, err
+	}
+	return s.store.GetCache(ctx, id)
 }
 
 func (s *Service) ListExecutions(ctx context.Context, taskID int64) ([]domain.SyncExecution, error) {
@@ -323,6 +376,14 @@ func resolveCacheBase(defaultBase string, taskBase string) string {
 		return filepath.Clean(base)
 	}
 	return filepath.Join(defaultBase, base)
+}
+
+func resolveCachePath(defaultBase string, taskBase string, cacheKey string, suffix string, existing *domain.RepoCache) string {
+	if existing != nil && strings.TrimSpace(existing.CachePath) != "" {
+		return filepath.Clean(existing.CachePath)
+	}
+	cacheRoot := resolveCacheBase(defaultBase, taskBase)
+	return filepath.Join(cacheRoot, cacheKey+suffix)
 }
 
 func dirSize(path string) int64 {
@@ -597,18 +658,18 @@ func (s *Service) syncSVNRepository(ctx context.Context, gitClient *git.Client, 
 
 	now := time.Now().UTC()
 	cacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL)
-	cacheRoot := resolveCacheBase(s.cacheDir, task.CacheBasePath)
-	cachePath := filepath.Join(cacheRoot, cacheKey)
-	_ = os.MkdirAll(cacheRoot, 0o755)
-
 	cacheHit := false
 	hitCount := 1
+	var existingCache *domain.RepoCache
 	if existing, getErr := s.store.GetCacheByKey(ctx, cacheKey); getErr == nil {
 		cacheHit = true
 		hitCount = existing.HitCount + 1
+		existingCache = &existing
 	} else if getErr != nil && getErr != sql.ErrNoRows {
 		return getErr
 	}
+	cachePath := resolveCachePath(s.cacheDir, task.CacheBasePath, cacheKey, "", existingCache)
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
 
 	logger.log(ctx, "Ensuring target repository for SVN import")
 	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, task.TargetRepoURL, task.ProviderConfig, credentials.TargetAPI)
@@ -651,6 +712,7 @@ func (s *Service) syncSVNRepository(ctx context.Context, gitClient *git.Client, 
 			HealthStatus:     "broken",
 			LastErrorMessage: fetchErr.Error(),
 		})
+		_ = s.store.LinkCacheToTask(ctx, cacheKey, task.ID)
 		_ = s.updateExecutionNode(ctx, node)
 		return fetchErr
 	}
@@ -668,6 +730,7 @@ func (s *Service) syncSVNRepository(ctx context.Context, gitClient *git.Client, 
 	}); err != nil {
 		return err
 	}
+	_ = s.store.LinkCacheToTask(ctx, cacheKey, task.ID)
 
 	logger.log(ctx, "Promoting SVN refs into Git branches/tags")
 	promoted, promoteErr := gitClient.PromoteSVNRefs(ctx, cachePath, task.SVNConfig)
@@ -738,18 +801,18 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 
 	now := time.Now().UTC()
 	cacheKey := buildCacheKey(task.TaskType, sourceRepoURL, targetRepoURL)
-	cacheRoot := resolveCacheBase(s.cacheDir, task.CacheBasePath)
-	cachePath := filepath.Join(cacheRoot, cacheKey+".git")
-	_ = os.MkdirAll(cacheRoot, 0o755)
-
 	cacheHit := false
 	hitCount := 1
+	var existingCache *domain.RepoCache
 	if existing, getErr := s.store.GetCacheByKey(ctx, cacheKey); getErr == nil {
 		cacheHit = true
 		hitCount = existing.HitCount + 1
+		existingCache = &existing
 	} else if getErr != nil && getErr != sql.ErrNoRows {
 		return syncResult{node: node, effectiveCommit: referenceCommit}, getErr
 	}
+	cachePath := resolveCachePath(s.cacheDir, task.CacheBasePath, cacheKey, ".git", existingCache)
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
 
 	autoCreated, createDuration, createErr := s.scm.EnsureRepository(ctx, targetRepoURL, task.ProviderConfig, currentCredentials.TargetAPI)
 	node.CacheKey = cacheKey
@@ -793,6 +856,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 			HealthStatus:     "broken",
 			LastErrorMessage: fetchErr.Error(),
 		})
+		_ = s.store.LinkCacheToTask(ctx, cacheKey, task.ID)
 		_ = s.updateExecutionNode(ctx, node)
 		return syncResult{node: node, effectiveCommit: referenceCommit}, fetchErr
 	}
@@ -808,6 +872,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		SizeBytes:     cacheSize,
 		HealthStatus:  "ready",
 	})
+	_ = s.store.LinkCacheToTask(ctx, cacheKey, task.ID)
 	cacheState := "cache miss"
 	if node.CacheHit {
 		cacheState = "cache hit"

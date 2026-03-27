@@ -346,6 +346,20 @@ func (s *Server) handleCacheByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid cache id")
 		return
 	}
+	if len(tail) == 1 && tail[0] == "move" && r.Method == http.MethodPost {
+		var payload domain.CacheMoveRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid cache move payload")
+			return
+		}
+		item, moveErr := s.service.MoveCache(r.Context(), id, payload.CachePath)
+		if moveErr != nil {
+			writeError(w, http.StatusBadRequest, moveErr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+		return
+	}
 	if len(tail) == 1 && tail[0] == "cleanup" && r.Method == http.MethodPost {
 		if err := s.service.CleanupCache(r.Context(), id); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())

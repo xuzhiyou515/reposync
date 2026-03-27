@@ -73,6 +73,7 @@ export interface RepoCache {
   sourceRepoUrl: string
   authContext: string
   cachePath: string
+  linkedTaskCount: number
   lastFetchAt?: string
   lastUsedAt?: string
   hitCount: number
