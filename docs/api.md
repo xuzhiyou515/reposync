@@ -26,6 +26,7 @@
   "submoduleTargetCredentialId": 5,
   "targetApiCredentialId": 3,
   "submoduleTargetApiCredentialId": 6,
+  "submoduleRewriteProtocol": "ssh",
   "enabled": true,
   "recursiveSubmodules": true,
   "syncAllRefs": true,
@@ -56,6 +57,10 @@
 - `submoduleTargetCredentialId` 用于子模块目标 Git 推送；留空时回退到 `targetCredentialId`
 - `targetApiCredentialId` 用于主仓库目标平台自动建仓；留空时回退到 `targetCredentialId`
 - `submoduleTargetApiCredentialId` 用于子模块自动建仓；留空时回退到 `targetApiCredentialId`
+- `submoduleRewriteProtocol` 控制重写 `.gitmodules` 时写回的子模块目标地址协议：
+  - `inherit`：继承目标仓库 URL 风格
+  - `http`：强制写为 HTTP/HTTPS
+  - `ssh`：强制写为 SSH
 
 ### `DELETE /api/tasks/:id`
 

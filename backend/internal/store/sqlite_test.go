@@ -114,6 +114,7 @@ func TestTaskRoundTripWithSubmoduleCredentials(t *testing.T) {
 		SubmoduleTargetCredentialID:    &submoduleTargetCredentialID,
 		TargetAPICredentialID:          &targetAPICredentialID,
 		SubmoduleTargetAPICredentialID: &submoduleTargetAPICredentialID,
+		SubmoduleRewriteProtocol:       domain.SubmoduleRewriteProtocolSSH,
 		Enabled:                        true,
 		SyncAllRefs:                    true,
 		ProviderConfig:                 domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
@@ -129,6 +130,9 @@ func TestTaskRoundTripWithSubmoduleCredentials(t *testing.T) {
 	}
 	if task.SubmoduleTargetAPICredentialID == nil || *task.SubmoduleTargetAPICredentialID != submoduleTargetAPICredentialID {
 		t.Fatalf("expected submodule target api credential id to round trip, got %+v", task.SubmoduleTargetAPICredentialID)
+	}
+	if task.SubmoduleRewriteProtocol != domain.SubmoduleRewriteProtocolSSH {
+		t.Fatalf("expected submodule rewrite protocol to round trip, got %q", task.SubmoduleRewriteProtocol)
 	}
 }
 

@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS sync_tasks (
   submodule_target_credential_id INTEGER,
   target_api_credential_id INTEGER,
   submodule_target_api_credential_id INTEGER,
+  submodule_rewrite_protocol TEXT NOT NULL DEFAULT 'inherit',
   enabled INTEGER NOT NULL,
   recursive_submodules INTEGER NOT NULL,
   sync_all_refs INTEGER NOT NULL,
@@ -173,6 +174,10 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
+	_, err = s.db.Exec(`ALTER TABLE sync_tasks ADD COLUMN submodule_rewrite_protocol TEXT NOT NULL DEFAULT 'inherit'`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
 	_, err = s.db.Exec(`ALTER TABLE sync_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'git_mirror'`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
@@ -228,6 +233,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	var submoduleTargetCredential sql.NullInt64
 	var targetAPICredential sql.NullInt64
 	var submoduleTargetAPICredential sql.NullInt64
+	var submoduleRewriteProtocol string
 	var enabled, recursive, syncAll int
 	var taskType, triggerJSON, providerJSON, svnConfigJSON string
 	var createdAt, updatedAt string
@@ -240,7 +246,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	if withLatest {
 		err = row.Scan(
 			&task.ID, &taskType, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
-			&srcCredential, &submoduleSrcCredential, &targetCredential, &submoduleTargetCredential, &targetAPICredential, &submoduleTargetAPICredential,
+			&srcCredential, &submoduleSrcCredential, &targetCredential, &submoduleTargetCredential, &targetAPICredential, &submoduleTargetAPICredential, &submoduleRewriteProtocol,
 			&enabled, &recursive, &syncAll,
 			&triggerJSON, &providerJSON, &svnConfigJSON,
 			&createdAt, &updatedAt,
@@ -249,7 +255,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	} else {
 		err = row.Scan(
 			&task.ID, &taskType, &task.Name, &task.SourceRepoURL, &task.TargetRepoURL, &task.CacheBasePath,
-			&srcCredential, &submoduleSrcCredential, &targetCredential, &submoduleTargetCredential, &targetAPICredential, &submoduleTargetAPICredential,
+			&srcCredential, &submoduleSrcCredential, &targetCredential, &submoduleTargetCredential, &targetAPICredential, &submoduleTargetAPICredential, &submoduleRewriteProtocol,
 			&enabled, &recursive, &syncAll,
 			&triggerJSON, &providerJSON, &svnConfigJSON,
 			&createdAt, &updatedAt,
@@ -276,6 +282,10 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	}
 	if submoduleTargetAPICredential.Valid {
 		task.SubmoduleTargetAPICredentialID = &submoduleTargetAPICredential.Int64
+	}
+	task.SubmoduleRewriteProtocol = domain.SubmoduleRewriteProtocol(submoduleRewriteProtocol)
+	if task.SubmoduleRewriteProtocol == "" {
+		task.SubmoduleRewriteProtocol = domain.SubmoduleRewriteProtocolInherit
 	}
 	task.Enabled = enabled == 1
 	task.RecursiveSubmodules = recursive == 1
@@ -326,6 +336,9 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 	if task.ProviderConfig.Provider == "" {
 		task.ProviderConfig.Provider = domain.ProviderGitHub
 	}
+	if task.SubmoduleRewriteProtocol == "" {
+		task.SubmoduleRewriteProtocol = domain.SubmoduleRewriteProtocolInherit
+	}
 	if task.ProviderConfig.Visibility == "" {
 		task.ProviderConfig.Visibility = domain.VisibilityPrivate
 	}
@@ -347,10 +360,10 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 	if task.ID == 0 {
 		res, err := s.db.ExecContext(ctx, `
 INSERT INTO sync_tasks (
-  task_type, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id, submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id,
+  task_type, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id, submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id, submodule_rewrite_protocol,
   enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, svn_config, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.TaskType, task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			task.TaskType, task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID, task.SubmoduleRewriteProtocol,
 			boolInt(task.Enabled), boolInt(task.RecursiveSubmodules), boolInt(task.SyncAllRefs),
 			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), toJSON(task.SVNConfig), timeString(now), timeString(now),
 		)
@@ -361,10 +374,10 @@ INSERT INTO sync_tasks (
 	} else {
 		_, err := s.db.ExecContext(ctx, `
 UPDATE sync_tasks SET
-  task_type = ?, name = ?, source_repo_url = ?, target_repo_url = ?, cache_base_path = ?, source_credential_id = ?, submodule_source_credential_id = ?, target_credential_id = ?, submodule_target_credential_id = ?, target_api_credential_id = ?, submodule_target_api_credential_id = ?,
+  task_type = ?, name = ?, source_repo_url = ?, target_repo_url = ?, cache_base_path = ?, source_credential_id = ?, submodule_source_credential_id = ?, target_credential_id = ?, submodule_target_credential_id = ?, target_api_credential_id = ?, submodule_target_api_credential_id = ?, submodule_rewrite_protocol = ?,
   enabled = ?, recursive_submodules = ?, sync_all_refs = ?, trigger_config = ?, provider_config = ?, svn_config = ?, updated_at = ?
 WHERE id = ?`,
-			task.TaskType, task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID,
+			task.TaskType, task.Name, task.SourceRepoURL, task.TargetRepoURL, task.CacheBasePath, task.SourceCredentialID, task.SubmoduleSourceCredentialID, task.TargetCredentialID, task.SubmoduleTargetCredentialID, task.TargetAPICredentialID, task.SubmoduleTargetAPICredentialID, task.SubmoduleRewriteProtocol,
 			boolInt(task.Enabled), boolInt(task.RecursiveSubmodules), boolInt(task.SyncAllRefs),
 			toJSON(task.TriggerConfig), toJSON(task.ProviderConfig), toJSON(task.SVNConfig), timeString(now), task.ID,
 		)
@@ -378,7 +391,7 @@ WHERE id = ?`,
 func (s *Store) GetTask(ctx context.Context, id int64) (domain.SyncTask, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, task_type, name, source_repo_url, target_repo_url, cache_base_path, source_credential_id, submodule_source_credential_id, target_credential_id,
-submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id,
+submodule_target_credential_id, target_api_credential_id, submodule_target_api_credential_id, submodule_rewrite_protocol,
 enabled, recursive_submodules, sync_all_refs, trigger_config, provider_config, svn_config, created_at, updated_at
 FROM sync_tasks WHERE id = ?`, id)
 	return scanTask(row, false)
@@ -387,7 +400,7 @@ FROM sync_tasks WHERE id = ?`, id)
 func (s *Store) ListTasks(ctx context.Context) ([]domain.SyncTask, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT
-  t.id, t.task_type, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.submodule_source_credential_id, t.target_credential_id, t.submodule_target_credential_id, t.target_api_credential_id, t.submodule_target_api_credential_id,
+  t.id, t.task_type, t.name, t.source_repo_url, t.target_repo_url, t.cache_base_path, t.source_credential_id, t.submodule_source_credential_id, t.target_credential_id, t.submodule_target_credential_id, t.target_api_credential_id, t.submodule_target_api_credential_id, t.submodule_rewrite_protocol,
   t.enabled, t.recursive_submodules, t.sync_all_refs, t.trigger_config, t.provider_config, t.svn_config, t.created_at, t.updated_at,
   e.id, COALESCE(e.status, ''), e.started_at, COALESCE(e.repo_count, 0), COALESCE(e.created_repo_count, 0)
 FROM sync_tasks t

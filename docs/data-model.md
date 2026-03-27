@@ -17,6 +17,7 @@
 | `submoduleTargetCredentialId` | integer nullable | 子模块目标 Git 凭证；留空时回退到 `targetCredentialId` |
 | `targetApiCredentialId` | integer nullable | 主仓库目标平台 API 凭证；留空时回退到 `targetCredentialId` |
 | `submoduleTargetApiCredentialId` | integer nullable | 子模块目标平台 API 凭证；留空时回退到 `targetApiCredentialId` |
+| `submoduleRewriteProtocol` | enum | `.gitmodules` 中子模块目标地址的重写协议，支持 `inherit` / `http` / `ssh`，默认 `inherit` |
 | `enabled` | boolean | 是否启用 |
 | `recursiveSubmodules` | boolean | 是否递归同步子模块 |
 | `syncAllRefs` | boolean | 是否镜像所有分支、标签和其他 refs；首版固定为 `true` |
@@ -24,6 +25,11 @@
 | `providerConfig` | json | 目标平台与自动建仓配置 |
 | `createdAt` | datetime | 创建时间 |
 | `updatedAt` | datetime | 更新时间 |
+
+补充说明：
+- `submoduleRewriteProtocol=inherit`：沿用目标仓库 URL 的风格，HTTP 目标继续写 HTTP，SSH 目标继续写 SSH。
+- `submoduleRewriteProtocol=http`：强制把重写后的子模块地址写为 HTTP/HTTPS。
+- `submoduleRewriteProtocol=ssh`：强制把重写后的子模块地址写为 SSH。
 
 ### triggerConfig
 

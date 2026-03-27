@@ -2,6 +2,7 @@ export type ProviderType = 'github' | 'gogs'
 export type Visibility = 'private' | 'public'
 export type CredentialType = 'ssh_key' | 'https_token' | 'api_token'
 export type TaskType = 'git_mirror' | 'svn_import'
+export type SubmoduleRewriteProtocol = 'inherit' | 'http' | 'ssh'
 
 export interface TriggerConfig {
   cron: string
@@ -40,6 +41,7 @@ export interface SyncTask {
   submoduleTargetCredentialId?: number | null
   targetApiCredentialId?: number | null
   submoduleTargetApiCredentialId?: number | null
+  submoduleRewriteProtocol: SubmoduleRewriteProtocol
   enabled: boolean
   recursiveSubmodules: boolean
   syncAllRefs: boolean

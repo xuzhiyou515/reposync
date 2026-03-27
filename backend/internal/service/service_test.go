@@ -38,6 +38,7 @@ func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 		parentTarget  string
 		submoduleURL  string
 		submodulePath string
+		protocol      domain.SubmoduleRewriteProtocol
 		expected      string
 	}{
 		{
@@ -45,6 +46,7 @@ func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 			parentTarget:  filepath.ToSlash(filepath.Join("D:/repos/targets", "main.git")),
 			submoduleURL:  "https://github.com/example/libs-core.git",
 			submodulePath: "libs/core",
+			protocol:      domain.SubmoduleRewriteProtocolInherit,
 			expected:      filepath.ToSlash(filepath.Join("D:/repos/targets", "libs-core.git")),
 		},
 		{
@@ -52,6 +54,7 @@ func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 			parentTarget:  "https://git.example.com/mirror/main.git",
 			submoduleURL:  "ssh://git@github.com/example/core-lib.git",
 			submodulePath: "vendor/core",
+			protocol:      domain.SubmoduleRewriteProtocolInherit,
 			expected:      "https://git.example.com/mirror/core-lib.git",
 		},
 		{
@@ -59,17 +62,63 @@ func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 			parentTarget:  "git@gogs.example.com:mirror/main.git",
 			submoduleURL:  "git@github.com:example/child.git",
 			submodulePath: "child",
+			protocol:      domain.SubmoduleRewriteProtocolInherit,
 			expected:      "git@gogs.example.com:mirror/child.git",
+		},
+		{
+			name:          "force ssh rewrite from https target",
+			parentTarget:  "https://git.example.com/mirror/main.git",
+			submoduleURL:  "https://github.com/example/child.git",
+			submodulePath: "child",
+			protocol:      domain.SubmoduleRewriteProtocolSSH,
+			expected:      "ssh://git@git.example.com/mirror/child.git",
+		},
+		{
+			name:          "force http rewrite from ssh target",
+			parentTarget:  "git@gogs.example.com:mirror/main.git",
+			submoduleURL:  "git@github.com:example/child.git",
+			submodulePath: "child",
+			protocol:      domain.SubmoduleRewriteProtocolHTTP,
+			expected:      "https://gogs.example.com/mirror/child.git",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mapSubmoduleTarget(tc.parentTarget, tc.submoduleURL, tc.submodulePath)
+			got := mapSubmoduleTarget(tc.parentTarget, tc.submoduleURL, tc.submodulePath, tc.protocol)
 			if got != tc.expected {
 				t.Fatalf("expected %s, got %s", tc.expected, got)
 			}
 		})
+	}
+}
+
+func TestSaveTaskRejectsUnsupportedSubmoduleRewriteProtocol(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	_, err = svc.SaveTask(context.Background(), domain.SyncTask{
+		Name:                     "bad-submodule-protocol",
+		SourceRepoURL:            "git@example.com:org/repo.git",
+		TargetRepoURL:            "https://target.example.com/org/repo.git",
+		Enabled:                  true,
+		SyncAllRefs:              true,
+		SubmoduleRewriteProtocol: domain.SubmoduleRewriteProtocol("ftp"),
+		ProviderConfig:           domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err == nil {
+		t.Fatal("expected save task to fail")
+	}
+	if !strings.Contains(err.Error(), "unsupported submoduleRewriteProtocol") {
+		t.Fatalf("expected protocol validation error, got %v", err)
 	}
 }
 

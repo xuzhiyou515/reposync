@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import axios from 'axios'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -56,6 +56,7 @@ const emptyTask = (): Partial<SyncTask> => ({
   submoduleTargetCredentialId: undefined,
   targetApiCredentialId: undefined,
   submoduleTargetApiCredentialId: undefined,
+  submoduleRewriteProtocol: 'inherit',
   triggerConfig: {
     cron: '0 */30 * * * *',
     webhookSecret: '',
@@ -346,6 +347,15 @@ const selectedExecutionConfigRows = computed(() => {
     rows.push(
       { label: '同步模式', value: task.recursiveSubmodules ? '递归子模块' : '单仓库镜像' },
       { label: '镜像范围', value: task.syncAllRefs ? '全部 refs' : '自定义' },
+      {
+        label: '.gitmodules URL',
+        value:
+          task.submoduleRewriteProtocol === 'ssh'
+            ? 'SSH'
+            : task.submoduleRewriteProtocol === 'http'
+              ? 'HTTP'
+              : 'Inherit',
+      },
     )
   }
   return rows
@@ -651,6 +661,7 @@ watch(
       taskForm.recursiveSubmodules = false
       taskForm.triggerConfig!.enableWebhook = false
       taskForm.syncAllRefs = true
+      taskForm.submoduleRewriteProtocol = 'inherit'
       taskForm.svnConfig = {
         trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
         branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
@@ -1529,6 +1540,14 @@ onBeforeUnmount(() => {
                 <div class="field-help">留空时会继承主仓库的目标平台 API 凭证。</div>
               </el-form-item>
             </div>
+            <el-form-item v-if="!taskFormIsSVNImport" label=".gitmodules 重写 URL">
+              <el-select v-model="taskForm.submoduleRewriteProtocol">
+                <el-option label="继承目标仓库 URL" value="inherit" />
+                <el-option label="强制 HTTP/HTTPS" value="http" />
+                <el-option label="强制 SSH" value="ssh" />
+              </el-select>
+              <div class="field-help">控制重写后的 `.gitmodules` 子模块地址是继承目标仓库、统一改成 HTTP/HTTPS，还是统一改成 SSH。</div>
+            </el-form-item>
           </div>
         </section>
 

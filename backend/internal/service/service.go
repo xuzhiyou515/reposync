@@ -47,6 +47,9 @@ func normalizeTask(task domain.SyncTask) domain.SyncTask {
 	if task.TaskType == "" {
 		task.TaskType = domain.TaskTypeGitMirror
 	}
+	if task.SubmoduleRewriteProtocol == "" {
+		task.SubmoduleRewriteProtocol = domain.SubmoduleRewriteProtocolInherit
+	}
 	if task.TaskType == domain.TaskTypeSVNImport {
 		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
 			task.SVNConfig.TrunkPath = "trunk"
@@ -67,6 +70,11 @@ func normalizeTask(task domain.SyncTask) domain.SyncTask {
 func (s *Service) validateTask(ctx context.Context, task domain.SyncTask) error {
 	if task.TaskType != domain.TaskTypeGitMirror && task.TaskType != domain.TaskTypeSVNImport {
 		return fmt.Errorf("unsupported taskType %q", task.TaskType)
+	}
+	switch task.SubmoduleRewriteProtocol {
+	case "", domain.SubmoduleRewriteProtocolInherit, domain.SubmoduleRewriteProtocolHTTP, domain.SubmoduleRewriteProtocolSSH:
+	default:
+		return fmt.Errorf("unsupported submoduleRewriteProtocol %q", task.SubmoduleRewriteProtocol)
 	}
 	if task.TaskType == domain.TaskTypeSVNImport {
 		if !isHTTPRepoURL(task.SourceRepoURL) {
@@ -820,7 +828,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 		submoduleMapping := map[string]git.SubmoduleRewrite{}
 		for _, submodule := range submodules {
 			childSource := adjustSubmoduleSourceURL(sourceRepoURL, submodule.URL, currentCredentials.Source)
-			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.URL, submodule.Path)
+			childTarget := mapSubmoduleTarget(targetRepoURL, submodule.URL, submodule.Path, task.SubmoduleRewriteProtocol)
 			logger.log(ctx, "Discovered submodule %s -> %s", submodule.Path, childTarget)
 			if childSource != submodule.URL {
 				logger.log(ctx, "Adjusted submodule source URL for %s based on source credential type", submodule.Path)
@@ -889,7 +897,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	return syncResult{node: node, effectiveCommit: node.ReferenceCommit}, err
 }
 
-func mapSubmoduleTarget(parentTarget string, submoduleURL string, submodulePath string) string {
+func mapSubmoduleTarget(parentTarget string, submoduleURL string, submodulePath string, protocol domain.SubmoduleRewriteProtocol) string {
 	repoName := submoduleRepoName(submoduleURL)
 	if repoName == "" {
 		repoName = fallbackSubmoduleRepoName(submodulePath)
@@ -898,13 +906,56 @@ func mapSubmoduleTarget(parentTarget string, submoduleURL string, submodulePath 
 		repoName = "submodule"
 	}
 
+	switch protocol {
+	case "", domain.SubmoduleRewriteProtocolInherit:
+		return normalizeGitTarget(replaceTargetRepo(parentTarget, repoName))
+	case domain.SubmoduleRewriteProtocolHTTP:
+		if converted, ok := toSubmoduleHTTPURL(parentTarget, repoName); ok {
+			return converted
+		}
+	case domain.SubmoduleRewriteProtocolSSH:
+		if converted, ok := toSubmoduleSSHURL(parentTarget, repoName); ok {
+			return converted
+		}
+	}
+	return normalizeGitTarget(replaceTargetRepo(parentTarget, repoName))
+}
+
+func replaceTargetRepo(parentTarget string, repoName string) string {
 	if strings.HasPrefix(parentTarget, "git@") {
-		return normalizeGitTarget(replaceSCPTargetRepo(parentTarget, repoName))
+		return replaceSCPTargetRepo(parentTarget, repoName)
 	}
 	if strings.HasPrefix(parentTarget, "http://") || strings.HasPrefix(parentTarget, "https://") || strings.HasPrefix(parentTarget, "ssh://") {
-		return normalizeGitTarget(replaceURLTargetRepo(parentTarget, repoName))
+		return replaceURLTargetRepo(parentTarget, repoName)
 	}
-	return normalizeGitTarget(replaceLocalTargetRepo(parentTarget, repoName))
+	return replaceLocalTargetRepo(parentTarget, repoName)
+}
+
+func toSubmoduleHTTPURL(parentTarget string, repoName string) (string, bool) {
+	replaced := replaceTargetRepo(parentTarget, repoName)
+	if strings.HasPrefix(replaced, "http://") || strings.HasPrefix(replaced, "https://") {
+		return normalizeGitTarget(replaced), true
+	}
+	preferredScheme := preferredHTTPScheme(parentTarget)
+	if converted, ok := toHTTPURL(replaced, preferredScheme); ok {
+		return normalizeGitTarget(converted), true
+	}
+	return "", false
+}
+
+func toSubmoduleSSHURL(parentTarget string, repoName string) (string, bool) {
+	replaced := replaceTargetRepo(parentTarget, repoName)
+	if strings.HasPrefix(replaced, "git@") || strings.HasPrefix(replaced, "ssh://") {
+		return normalizeGitTarget(replaced), true
+	}
+	username := sshUserFromParent(parentTarget)
+	if username == "" {
+		username = "git"
+	}
+	if converted, ok := toSSHURL(replaced, username, parentTarget); ok {
+		return normalizeGitTarget(converted), true
+	}
+	return "", false
 }
 
 func adjustSubmoduleSourceURL(parentSourceURL string, rawSubmoduleURL string, credential *domain.Credential) string {
