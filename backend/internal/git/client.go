@@ -487,14 +487,38 @@ func forcePushBranchArgs(remote string, branch string) []string {
 func (c *Client) streamPipe(wg *sync.WaitGroup, stream string, pipe io.ReadCloser, out *bytes.Buffer) {
 	defer wg.Done()
 	defer pipe.Close()
-	scanner := bufio.NewScanner(pipe)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		out.WriteString(line)
+	reader := bufio.NewReader(pipe)
+	var line bytes.Buffer
+	flushLine := func() {
+		text := strings.TrimSpace(strings.ReplaceAll(line.String(), "\x00", ""))
+		line.Reset()
+		if text == "" {
+			return
+		}
+		out.WriteString(text)
 		out.WriteByte('\n')
-		if c.logf != nil && strings.TrimSpace(line) != "" {
-			c.logf("git %s: %s", stream, line)
+		if c.logf != nil {
+			c.logf("git %s: %s", stream, text)
+		}
+	}
+	for {
+		b, err := reader.ReadByte()
+		if line.Len() >= 1024*1024 {
+			flushLine()
+		}
+		switch {
+		case err == nil && (b == '\n' || b == '\r'):
+			flushLine()
+			continue
+		case err == nil:
+			line.WriteByte(b)
+			continue
+		case errors.Is(err, io.EOF):
+			flushLine()
+			return
+		default:
+			flushLine()
+			return
 		}
 	}
 }

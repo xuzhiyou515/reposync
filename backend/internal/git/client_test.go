@@ -1,9 +1,12 @@
 package git
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"reposync/backend/internal/domain"
@@ -98,6 +101,26 @@ func TestPrepareSVNAuthInjectsUsernameAndPassword(t *testing.T) {
 	}
 	if !strings.Contains(authURL, "svn-user:svn-pass@") {
 		t.Fatalf("expected password embedded in auth url, got %s", authURL)
+	}
+}
+
+func TestStreamPipeSplitsCarriageReturnProgressLines(t *testing.T) {
+	client := &Client{}
+	input := io.NopCloser(strings.NewReader("progress 1\rprogress 2\rfinal line\n"))
+	var wg sync.WaitGroup
+	var out bytes.Buffer
+
+	wg.Add(1)
+	client.streamPipe(&wg, "stderr", input, &out)
+	wg.Wait()
+
+	got := strings.TrimSpace(out.String())
+	lines := strings.Split(got, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), got)
+	}
+	if lines[0] != "progress 1" || lines[1] != "progress 2" || lines[2] != "final line" {
+		t.Fatalf("unexpected split lines: %#v", lines)
 	}
 }
 
