@@ -30,5 +30,5 @@ if (-not $env:REPOSYNC_DB_PATH) {
 if (-not $env:REPOSYNC_CACHE_DIR) {
   $env:REPOSYNC_CACHE_DIR = (Join-Path $ReleaseRoot "data\cache")
 }
-
+$env:NO_PROXY = "localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,.tailbee4e7.ts.net"
 & $BackendExe

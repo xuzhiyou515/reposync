@@ -40,7 +40,13 @@
 ### Windows PowerShell
 
 ```powershell
-./scripts/build-release.ps1
+PowerShell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
+```
+
+如果当前机器启用了严格执行策略，也可以直接运行：
+
+```bat
+.\scripts\build-release.cmd
 ```
 
 ### Linux / macOS
