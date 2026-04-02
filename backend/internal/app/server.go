@@ -393,6 +393,28 @@ func (s *Server) handleExecutionByID(w http.ResponseWriter, r *http.Request) {
 		s.handleExecutionWebSocket(w, r, id)
 		return
 	}
+	if len(tail) == 1 && tail[0] == "logs" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		afterID := int64(0)
+		if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+			parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil {
+				writeError(w, http.StatusBadRequest, "invalid after log id")
+				return
+			}
+			afterID = parsed
+		}
+		items, listErr := s.service.ListExecutionLogs(r.Context(), id, afterID, 0)
+		if listErr != nil {
+			writeError(w, http.StatusInternalServerError, listErr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return

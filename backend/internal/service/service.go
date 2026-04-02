@@ -255,6 +255,10 @@ func (s *Service) ExecutionDetail(ctx context.Context, id int64) (domain.Executi
 	return s.store.GetExecutionDetail(ctx, id)
 }
 
+func (s *Service) ListExecutionLogs(ctx context.Context, executionID int64, afterID int64, limit int) ([]domain.ExecutionLogEntry, error) {
+	return s.store.ListExecutionLogs(ctx, executionID, afterID, limit)
+}
+
 func (s *Service) ListWebhookEvents(ctx context.Context, taskID int64) ([]domain.WebhookEvent, error) {
 	return s.store.ListWebhookEventsForTask(ctx, taskID)
 }
@@ -468,11 +472,12 @@ func (l *executionLogger) log(ctx context.Context, format string, args ...any) {
 	}
 	now := east8Now()
 	line := fmt.Sprintf("%s  %s", now.Format(time.RFC3339), fmt.Sprintf(format, args...))
-	if strings.TrimSpace(l.execution.SummaryLog) == "" {
-		l.execution.SummaryLog = line
-	} else {
-		l.execution.SummaryLog += "\n" + line
+	entry, err := l.store.AppendExecutionLog(ctx, l.execution.ID, line)
+	if err != nil {
+		return
 	}
+	l.execution.LogCount++
+	l.execution.LastLogID = entry.ID
 	if l.onUpdate != nil {
 		l.onUpdate(*l.execution)
 	}

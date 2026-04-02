@@ -110,10 +110,12 @@ func TestHandleExecutionStreamWritesEvent(t *testing.T) {
 		TaskID:      1,
 		TriggerType: domain.TriggerManual,
 		Status:      domain.ExecutionStatusSuccess,
-		SummaryLog:  "line 1",
 	})
 	if err != nil {
 		t.Fatalf("create execution: %v", err)
+	}
+	if _, err := dbStore.AppendExecutionLog(ctx, execution.ID, "line 1"); err != nil {
+		t.Fatalf("append execution log: %v", err)
 	}
 
 	server := &Server{mux: http.NewServeMux(), store: dbStore, service: svc}
@@ -126,7 +128,7 @@ func TestHandleExecutionStreamWritesEvent(t *testing.T) {
 	if !strings.Contains(body, "event: execution") {
 		t.Fatalf("expected sse execution event, got %q", body)
 	}
-	if !strings.Contains(body, `"summaryLog":"line 1"`) {
+	if !strings.Contains(body, `"logCount":1`) {
 		t.Fatalf("expected execution payload in stream, got %q", body)
 	}
 }
@@ -158,10 +160,12 @@ func TestHandleExecutionWebSocketWritesEvent(t *testing.T) {
 		TaskID:      1,
 		TriggerType: domain.TriggerManual,
 		Status:      domain.ExecutionStatusSuccess,
-		SummaryLog:  "line 1",
 	})
 	if err != nil {
 		t.Fatalf("create execution: %v", err)
+	}
+	if _, err := dbStore.AppendExecutionLog(ctx, execution.ID, "line 1"); err != nil {
+		t.Fatalf("append execution log: %v", err)
 	}
 
 	server := &Server{mux: http.NewServeMux(), store: dbStore, service: svc}
@@ -190,8 +194,62 @@ func TestHandleExecutionWebSocketWritesEvent(t *testing.T) {
 	if payload.Type != "execution" {
 		t.Fatalf("expected execution payload type, got %q", payload.Type)
 	}
-	if payload.Detail.Execution.SummaryLog != "line 1" {
-		t.Fatalf("expected summary log in websocket payload, got %q", payload.Detail.Execution.SummaryLog)
+	if payload.Detail.Execution.LogCount != 1 {
+		t.Fatalf("expected execution log count in websocket payload, got %d", payload.Detail.Execution.LogCount)
+	}
+}
+
+func TestHandleExecutionLogsReturnsEntries(t *testing.T) {
+	db := filepathJoinTemp(t, "reposync.db")
+	box := security.NewSecretBox("test-secret")
+	dbStore, err := store.New(db, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer dbStore.Close()
+
+	svc := service.New(dbStore, filepathJoinTemp(t, "cache"), git.NewClient("git"), scm.NewManager())
+	ctx := context.Background()
+	_, err = dbStore.SaveTask(ctx, domain.SyncTask{
+		Name:           "demo",
+		SourceRepoURL:  "src",
+		TargetRepoURL:  "dst",
+		Enabled:        true,
+		SyncAllRefs:    true,
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+		TriggerConfig:  domain.TriggerConfig{},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	execution, err := dbStore.CreateExecution(ctx, domain.SyncExecution{
+		TaskID:      1,
+		TriggerType: domain.TriggerManual,
+		Status:      domain.ExecutionStatusSuccess,
+	})
+	if err != nil {
+		t.Fatalf("create execution: %v", err)
+	}
+	first, err := dbStore.AppendExecutionLog(ctx, execution.ID, "line 1")
+	if err != nil {
+		t.Fatalf("append first log: %v", err)
+	}
+	if _, err := dbStore.AppendExecutionLog(ctx, execution.ID, "line 2"); err != nil {
+		t.Fatalf("append second log: %v", err)
+	}
+
+	server := &Server{mux: http.NewServeMux(), store: dbStore, service: svc}
+	server.routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/executions/"+strconv.FormatInt(execution.ID, 10)+"/logs?after="+strconv.FormatInt(first.ID, 10), nil)
+	rec := httptest.NewRecorder()
+	server.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"message":"line 2"`) {
+		t.Fatalf("expected filtered execution log payload, got %q", rec.Body.String())
 	}
 }
 

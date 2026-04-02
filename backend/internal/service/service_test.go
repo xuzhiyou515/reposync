@@ -550,11 +550,12 @@ func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if !detail.Nodes[0].CacheHit {
 		t.Fatalf("expected second run to hit cache")
 	}
-	if !strings.Contains(detail.Execution.SummaryLog, "Refreshing mirror cache") {
-		t.Fatalf("expected execution summary log to include progress output, got:\n%s", detail.Execution.SummaryLog)
+	logText := executionLogText(t, svc, second.ID)
+	if !strings.Contains(logText, "Refreshing mirror cache") {
+		t.Fatalf("expected execution logs to include progress output, got:\n%s", logText)
 	}
-	if !strings.Contains(detail.Execution.SummaryLog, "git exec: fetch --progress --prune origin +refs/*:refs/*") {
-		t.Fatalf("expected execution summary log to include raw git command output, got:\n%s", detail.Execution.SummaryLog)
+	if !strings.Contains(logText, "git exec: fetch --progress --prune origin +refs/*:refs/*") {
+		t.Fatalf("expected execution logs to include raw git command output, got:\n%s", logText)
 	}
 }
 
@@ -711,8 +712,8 @@ func TestRunTaskSubscriptionReceivesRealtimeLogUpdates(t *testing.T) {
 	}
 	defer cancel()
 
-	if !strings.Contains(initial.Execution.SummaryLog, "Execution started") {
-		t.Fatalf("expected initial summary log to contain execution start, got %q", initial.Execution.SummaryLog)
+	if initial.Execution.LogCount == 0 || initial.Execution.LastLogID == 0 {
+		t.Fatalf("expected initial execution metadata to expose logs, got count=%d last=%d", initial.Execution.LogCount, initial.Execution.LastLogID)
 	}
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -723,9 +724,7 @@ func TestRunTaskSubscriptionReceivesRealtimeLogUpdates(t *testing.T) {
 			if !ok {
 				t.Fatal("execution updates channel closed before realtime update arrived")
 			}
-			if strings.Contains(detail.Execution.SummaryLog, "Syncing (root)") ||
-				strings.Contains(detail.Execution.SummaryLog, "Refreshing mirror cache") ||
-				strings.Contains(detail.Execution.SummaryLog, "git exec:") {
+			if detail.Execution.LastLogID > initial.Execution.LastLogID || detail.Execution.LogCount > initial.Execution.LogCount {
 				sawRealtimeUpdate = true
 			}
 		case <-time.After(200 * time.Millisecond):
@@ -1042,9 +1041,9 @@ func TestRunTaskImportsSVNRepositoryEndToEnd(t *testing.T) {
 	}
 	execution = waitForExecutionCompletion(t, svc, execution.ID)
 	if execution.Status != domain.ExecutionStatusSuccess {
-		detail, detailErr := svc.ExecutionDetail(context.Background(), execution.ID)
+		_, detailErr := svc.ExecutionDetail(context.Background(), execution.ID)
 		if detailErr == nil {
-			t.Fatalf("expected success, got %s\nsummary log:\n%s", execution.Status, detail.Execution.SummaryLog)
+			t.Fatalf("expected success, got %s\nexecution detail loaded", execution.Status)
 		}
 		t.Fatalf("expected success, got %s", execution.Status)
 	}
@@ -1069,9 +1068,23 @@ func TestRunTaskImportsSVNRepositoryEndToEnd(t *testing.T) {
 	if len(detail.Nodes) != 1 {
 		t.Fatalf("expected 1 execution node, got %d", len(detail.Nodes))
 	}
-	if !strings.Contains(detail.Execution.SummaryLog, "Promoting SVN refs") {
-		t.Fatalf("expected summary log to mention svn ref promotion, got:\n%s", detail.Execution.SummaryLog)
+	logText := executionLogText(t, svc, execution.ID)
+	if !strings.Contains(logText, "Promoting SVN refs") {
+		t.Fatalf("expected execution logs to mention svn ref promotion, got:\n%s", logText)
 	}
+}
+
+func executionLogText(t *testing.T, svc *Service, executionID int64) string {
+	t.Helper()
+	logs, err := svc.ListExecutionLogs(context.Background(), executionID, 0, 0)
+	if err != nil {
+		t.Fatalf("list execution logs: %v", err)
+	}
+	lines := make([]string, 0, len(logs))
+	for _, item := range logs {
+		lines = append(lines, item.Message)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func runGit(t *testing.T, dir string, args ...string) string {

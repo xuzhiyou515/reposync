@@ -5,7 +5,7 @@ import { ElMessage } from 'element-plus'
 import type { ElTree } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '../api'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, TaskType, WebhookEvent } from '../types'
+import type { Credential, ExecutionDetail, ExecutionLogEntry, RepoCache, SyncExecution, SyncExecutionNode, SyncTask, TaskType, WebhookEvent } from '../types'
 
 const tasks = ref<SyncTask[]>([])
 const credentials = ref<Credential[]>([])
@@ -15,6 +15,7 @@ const webhookEvents = ref<WebhookEvent[]>([])
 type WorkspaceTab = 'tasks' | 'credentials' | 'caches'
 const activeWorkspaceTab = ref<WorkspaceTab>('tasks')
 const selectedExecution = ref<ExecutionDetail | null>(null)
+const selectedExecutionLogs = ref<ExecutionLogEntry[]>([])
 const loading = ref(false)
 const taskDialogVisible = ref(false)
 const credentialDialogVisible = ref(false)
@@ -31,6 +32,7 @@ const TASK_LIST_REFRESH_MS = 15000
 let executionStream: EventSource | null = null
 let executionSocket: WebSocket | null = null
 let taskListRefreshTimer: number | null = null
+let executionLogRefreshTimer: number | null = null
 const executionTreeRef = ref<InstanceType<typeof ElTree>>()
 const taskFormRef = ref<FormInstance>()
 const credentialSecretMasked = ref('')
@@ -448,6 +450,10 @@ const getErrorMessage = (error: unknown, fallback: string) => {
 }
 
 const stopExecutionStreaming = () => {
+  if (executionLogRefreshTimer != null) {
+    window.clearTimeout(executionLogRefreshTimer)
+    executionLogRefreshTimer = null
+  }
   if (executionSocket) {
     executionSocket.onclose = null
     executionSocket.onerror = null
@@ -462,14 +468,45 @@ const stopExecutionStreaming = () => {
   }
 }
 
+const loadExecutionLogs = async (executionId: number, reset = false) => {
+  const afterId = reset ? undefined : selectedExecutionLogs.value[selectedExecutionLogs.value.length - 1]?.id
+  const items = await api.executionLogs(executionId, afterId)
+  if (reset) {
+    selectedExecutionLogs.value = items
+    return
+  }
+  if (!items.length) {
+    return
+  }
+  selectedExecutionLogs.value = [...selectedExecutionLogs.value, ...items]
+}
+
+const scheduleExecutionLogRefresh = (executionId: number, reset = false) => {
+  if (executionLogRefreshTimer != null) {
+    window.clearTimeout(executionLogRefreshTimer)
+  }
+  executionLogRefreshTimer = window.setTimeout(() => {
+    executionLogRefreshTimer = null
+    void loadExecutionLogs(executionId, reset)
+  }, 80)
+}
+
 const applyExecutionDetail = async (detail: ExecutionDetail) => {
+  const previousExecutionID = selectedExecution.value?.execution.id
+  const previousLastLogID = selectedExecution.value?.execution.lastLogId ?? 0
   selectedExecution.value = detail
   if (selectedNodeId.value == null) {
     selectedNodeId.value = detail.nodes[0]?.id ?? null
   }
+  if (previousExecutionID !== detail.execution.id) {
+    await loadExecutionLogs(detail.execution.id, true)
+  } else if (detail.execution.lastLogId > previousLastLogID) {
+    scheduleExecutionLogRefresh(detail.execution.id)
+  }
   await nextTick()
   syncTreeExpansion()
   if (detail.execution.status !== 'running') {
+    await loadExecutionLogs(detail.execution.id)
     stopExecutionStreaming()
     if (executionTaskId.value != null) {
       await loadExecutions(executionTaskId.value)
@@ -744,6 +781,8 @@ const openExecutionByID = async (executionId?: number) => {
     createdRepoCount: 0,
     failedNodeCount: 0,
     summaryLog: '',
+    logCount: 0,
+    lastLogId: 0,
   })
 }
 
@@ -776,6 +815,7 @@ const openExecutionLive = async (task: SyncTask, execution: SyncExecution) => {
   expandedNodeIds.value = new Set()
   errorOnly.value = false
   selectedNodeId.value = null
+  selectedExecutionLogs.value = []
   executionDetailVisible.value = true
   executionDetailLoading.value = false
   await nextTick()
@@ -808,11 +848,13 @@ const removeCredential = async (credential: Credential) => {
 
 const openExecution = async (execution: SyncExecution) => {
   executionDetailLoading.value = true
+  selectedExecutionLogs.value = []
   selectedExecution.value = await api.executionDetail(execution.id)
   expandedNodeIds.value = new Set(selectedExecution.value.nodes.map((node) => node.id))
   errorOnly.value = false
   selectedNodeId.value = selectedExecution.value.nodes[0]?.id ?? null
   executionDetailVisible.value = true
+  await loadExecutionLogs(execution.id, true)
   await nextTick()
   syncTreeExpansion()
   ensureExecutionStreaming()
@@ -850,6 +892,7 @@ const closeExecutionDetail = () => {
   executionDetailVisible.value = false
   executionDetailLoading.value = false
   selectedExecution.value = null
+  selectedExecutionLogs.value = []
   selectedNodeId.value = null
   expandedNodeIds.value = new Set()
   stopExecutionStreaming()
@@ -1032,7 +1075,7 @@ const formatConsoleLikeExecutionLog = (summaryLog?: string) => {
   return output.join('\n')
 }
 
-const executionConsoleLog = computed(() => formatConsoleLikeExecutionLog(selectedExecution.value?.execution.summaryLog))
+const executionConsoleLog = computed(() => formatConsoleLikeExecutionLog(selectedExecutionLogs.value.map((item) => item.message).join('\n')))
 
 const expandAllNodes = () => {
   if (!selectedExecution.value) {

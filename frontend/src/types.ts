@@ -93,6 +93,15 @@ export interface SyncExecution {
   createdRepoCount: number
   failedNodeCount: number
   summaryLog: string
+  logCount: number
+  lastLogId: number
+}
+
+export interface ExecutionLogEntry {
+  id: number
+  executionId: number
+  message: string
+  createdAt: string
 }
 
 export interface SyncExecutionNode {

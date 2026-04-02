@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Credential, ExecutionDetail, RepoCache, SyncExecution, SyncTask, WebhookEvent } from './types'
+import type { Credential, ExecutionDetail, ExecutionLogEntry, RepoCache, SyncExecution, SyncTask, WebhookEvent } from './types'
 
 const http = axios.create({
   baseURL: '/api',
@@ -27,6 +27,8 @@ export const api = {
   replayWebhookEvent: async (taskId: number, eventId: number) =>
     (await http.post<SyncExecution>(`/tasks/${taskId}/webhook-events/${eventId}/replay`)).data,
   executionDetail: async (id: number) => (await http.get<ExecutionDetail>(`/executions/${id}`)).data,
+  executionLogs: async (id: number, afterId?: number) =>
+    (await http.get<ExecutionLogEntry[]>(`/executions/${id}/logs`, { params: afterId ? { after: afterId } : undefined })).data,
   listCredentials: async () => (await http.get<Credential[]>('/credentials')).data,
   saveCredential: async (credential: Partial<Credential>) => {
     if (credential.id) {

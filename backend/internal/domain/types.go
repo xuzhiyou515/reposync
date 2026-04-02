@@ -133,6 +133,15 @@ type SyncExecution struct {
 	CreatedRepoCount int             `json:"createdRepoCount"`
 	FailedNodeCount  int             `json:"failedNodeCount"`
 	SummaryLog       string          `json:"summaryLog"`
+	LogCount         int             `json:"logCount"`
+	LastLogID        int64           `json:"lastLogId"`
+}
+
+type ExecutionLogEntry struct {
+	ID          int64     `json:"id"`
+	ExecutionID int64     `json:"executionId"`
+	Message     string    `json:"message"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 type SyncExecutionNode struct {

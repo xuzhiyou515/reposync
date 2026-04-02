@@ -107,7 +107,15 @@ CREATE TABLE IF NOT EXISTS sync_executions (
   repo_count INTEGER NOT NULL DEFAULT 0,
   created_repo_count INTEGER NOT NULL DEFAULT 0,
   failed_node_count INTEGER NOT NULL DEFAULT 0,
+  log_count INTEGER NOT NULL DEFAULT 0,
+  last_log_id INTEGER NOT NULL DEFAULT 0,
   summary_log TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS execution_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  message TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sync_execution_nodes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -189,6 +197,14 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 		return err
 	}
 	_, err = s.db.Exec(`ALTER TABLE sync_tasks ADD COLUMN svn_config TEXT NOT NULL DEFAULT '{}'`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE sync_executions ADD COLUMN log_count INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE sync_executions ADD COLUMN last_log_id INTEGER NOT NULL DEFAULT 0`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
@@ -537,10 +553,10 @@ func (s *Store) CreateExecution(ctx context.Context, execution domain.SyncExecut
 	startedAt := time.Now().UTC()
 	execution.StartedAt = startedAt.In(east8Location)
 	res, err := s.db.ExecContext(ctx, `
-INSERT INTO sync_executions (task_id, trigger_type, status, started_at, repo_count, created_repo_count, failed_node_count, summary_log)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO sync_executions (task_id, trigger_type, status, started_at, repo_count, created_repo_count, failed_node_count, log_count, last_log_id, summary_log)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		execution.TaskID, execution.TriggerType, execution.Status, timeString(startedAt),
-		execution.RepoCount, execution.CreatedRepoCount, execution.FailedNodeCount, execution.SummaryLog,
+		execution.RepoCount, execution.CreatedRepoCount, execution.FailedNodeCount, execution.LogCount, execution.LastLogID, execution.SummaryLog,
 	)
 	if err != nil {
 		return domain.SyncExecution{}, err
@@ -552,12 +568,39 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 func (s *Store) UpdateExecution(ctx context.Context, execution domain.SyncExecution) error {
 	_, err := s.db.ExecContext(ctx, `
 UPDATE sync_executions
-SET status = ?, finished_at = ?, repo_count = ?, created_repo_count = ?, failed_node_count = ?, summary_log = ?
+SET status = ?, finished_at = ?, repo_count = ?, created_repo_count = ?, failed_node_count = ?, log_count = ?, last_log_id = ?, summary_log = ?
 WHERE id = ?`,
 		execution.Status, nullableTime(execution.FinishedAt), execution.RepoCount, execution.CreatedRepoCount,
-		execution.FailedNodeCount, execution.SummaryLog, execution.ID,
+		execution.FailedNodeCount, execution.LogCount, execution.LastLogID, execution.SummaryLog, execution.ID,
 	)
 	return err
+}
+
+func (s *Store) AppendExecutionLog(ctx context.Context, executionID int64, message string) (domain.ExecutionLogEntry, error) {
+	now := time.Now().UTC()
+	entry := domain.ExecutionLogEntry{
+		ExecutionID: executionID,
+		Message:     message,
+		CreatedAt:   now.In(east8Location),
+	}
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO execution_logs (execution_id, created_at, message)
+VALUES (?, ?, ?)`,
+		executionID, timeString(now), message,
+	)
+	if err != nil {
+		return domain.ExecutionLogEntry{}, err
+	}
+	entry.ID, _ = res.LastInsertId()
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE sync_executions
+SET log_count = log_count + 1, last_log_id = ?
+WHERE id = ?`,
+		entry.ID, executionID,
+	); err != nil {
+		return domain.ExecutionLogEntry{}, err
+	}
+	return entry, nil
 }
 
 func (s *Store) CreateExecutionNode(ctx context.Context, node domain.SyncExecutionNode) (domain.SyncExecutionNode, error) {
@@ -593,7 +636,7 @@ WHERE id = ?`,
 
 func (s *Store) ListExecutionsForTask(ctx context.Context, taskID int64) ([]domain.SyncExecution, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, task_id, trigger_type, status, started_at, finished_at, repo_count, created_repo_count, failed_node_count, summary_log
+SELECT id, task_id, trigger_type, status, started_at, finished_at, repo_count, created_repo_count, failed_node_count, log_count, last_log_id, summary_log
 FROM sync_executions WHERE task_id = ? ORDER BY started_at DESC`, taskID)
 	if err != nil {
 		return nil, err
@@ -604,7 +647,7 @@ FROM sync_executions WHERE task_id = ? ORDER BY started_at DESC`, taskID)
 		var item domain.SyncExecution
 		var startedAt string
 		var finishedAt sql.NullString
-		if err := rows.Scan(&item.ID, &item.TaskID, &item.TriggerType, &item.Status, &startedAt, &finishedAt, &item.RepoCount, &item.CreatedRepoCount, &item.FailedNodeCount, &item.SummaryLog); err != nil {
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.TriggerType, &item.Status, &startedAt, &finishedAt, &item.RepoCount, &item.CreatedRepoCount, &item.FailedNodeCount, &item.LogCount, &item.LastLogID, &item.SummaryLog); err != nil {
 			return nil, err
 		}
 		item.StartedAt = parseTime(startedAt)
@@ -617,11 +660,11 @@ FROM sync_executions WHERE task_id = ? ORDER BY started_at DESC`, taskID)
 func (s *Store) GetExecutionDetail(ctx context.Context, id int64) (domain.ExecutionDetail, error) {
 	var detail domain.ExecutionDetail
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, task_id, trigger_type, status, started_at, finished_at, repo_count, created_repo_count, failed_node_count, summary_log
+SELECT id, task_id, trigger_type, status, started_at, finished_at, repo_count, created_repo_count, failed_node_count, log_count, last_log_id, summary_log
 FROM sync_executions WHERE id = ?`, id)
 	var startedAt string
 	var finishedAt sql.NullString
-	if err := row.Scan(&detail.Execution.ID, &detail.Execution.TaskID, &detail.Execution.TriggerType, &detail.Execution.Status, &startedAt, &finishedAt, &detail.Execution.RepoCount, &detail.Execution.CreatedRepoCount, &detail.Execution.FailedNodeCount, &detail.Execution.SummaryLog); err != nil {
+	if err := row.Scan(&detail.Execution.ID, &detail.Execution.TaskID, &detail.Execution.TriggerType, &detail.Execution.Status, &startedAt, &finishedAt, &detail.Execution.RepoCount, &detail.Execution.CreatedRepoCount, &detail.Execution.FailedNodeCount, &detail.Execution.LogCount, &detail.Execution.LastLogID, &detail.Execution.SummaryLog); err != nil {
 		return detail, err
 	}
 	detail.Execution.StartedAt = parseTime(startedAt)
@@ -654,6 +697,39 @@ FROM sync_execution_nodes WHERE execution_id = ? ORDER BY id ASC`, id)
 		detail.Nodes = append(detail.Nodes, node)
 	}
 	return detail, rows.Err()
+}
+
+func (s *Store) ListExecutionLogs(ctx context.Context, executionID int64, afterID int64, limit int) ([]domain.ExecutionLogEntry, error) {
+	query := `
+SELECT id, execution_id, created_at, message
+FROM execution_logs
+WHERE execution_id = ?`
+	args := []any{executionID}
+	if afterID > 0 {
+		query += ` AND id > ?`
+		args = append(args, afterID)
+	}
+	query += ` ORDER BY id ASC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []domain.ExecutionLogEntry
+	for rows.Next() {
+		var item domain.ExecutionLogEntry
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.ExecutionID, &createdAt, &item.Message); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseTime(createdAt)
+		entries = append(entries, item)
+	}
+	return entries, rows.Err()
 }
 
 func (s *Store) UpsertCache(ctx context.Context, cache domain.RepoCache) error {
