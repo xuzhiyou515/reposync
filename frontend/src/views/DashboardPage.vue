@@ -987,6 +987,53 @@ const webhookReasonLabel = (reason?: string) => {
   return reason
 }
 
+const gitProgressPrefix = (line: string) => {
+  const trimmed = line.trim()
+  const patterns = [
+    /^remote: (Enumerating objects):/i,
+    /^remote: (Counting objects):/i,
+    /^remote: (Compressing objects):/i,
+    /^remote: (Receiving objects):/i,
+    /^remote: (Resolving deltas):/i,
+    /^remote: (Writing objects):/i,
+    /^remote: (Finding sources):/i,
+    /^remote: (Updating files):/i,
+    /^(git running):/i,
+  ]
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern)
+    if (match) {
+      return match[1].toLowerCase()
+    }
+  }
+  return ''
+}
+
+const formatConsoleLikeExecutionLog = (summaryLog?: string) => {
+  if (!summaryLog?.trim()) {
+    return '等待日志输出...'
+  }
+  const output: string[] = []
+  for (const rawLine of summaryLog.split(/\r?\n/)) {
+    const line = rawLine.trimEnd()
+    if (!line.trim()) {
+      if (output.at(-1) !== '') {
+        output.push('')
+      }
+      continue
+    }
+    const prefix = gitProgressPrefix(line)
+    if (prefix && output.length > 0 && gitProgressPrefix(output[output.length - 1]) === prefix) {
+      output[output.length - 1] = line
+      continue
+    }
+    output.push(line)
+  }
+  return output.join('\n')
+}
+
+const executionConsoleLog = computed(() => formatConsoleLikeExecutionLog(selectedExecution.value?.execution.summaryLog))
+
 const expandAllNodes = () => {
   if (!selectedExecution.value) {
     return
@@ -1369,7 +1416,7 @@ onBeforeUnmount(() => {
           <div class="panel-header">
             <strong>执行日志</strong>
           </div>
-          <pre class="log-output">{{ selectedExecution.execution.summaryLog || '等待日志输出...' }}</pre>
+          <pre class="log-output">{{ executionConsoleLog }}</pre>
         </div>
 
         <div class="execution-layout">
