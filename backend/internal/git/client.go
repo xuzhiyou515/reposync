@@ -136,7 +136,7 @@ func (c *Client) MirrorPush(ctx context.Context, cachePath string, targetURL str
 func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cachePath string, svnConfig domain.SVNConfig, credential *domain.Credential) (bool, time.Duration, error) {
 	started := time.Now()
 	cacheHit := isGitWorktree(cachePath)
-	authURL, env, svnAuthArgs, cleanup, err := prepareSVNAuth(sourceURL, credential)
+	authURL, env, svnAuthArgs, bootstrap, cleanup, err := prepareSVNAuth(sourceURL, credential)
 	if err != nil {
 		return cacheHit, 0, err
 	}
@@ -147,7 +147,7 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 	}
 	defer authorCleanup()
 
-	if !cacheHit {
+	cloneFresh := func() (bool, time.Duration, error) {
 		if info, statErr := os.Stat(cachePath); statErr == nil && info.IsDir() {
 			if c.logf != nil {
 				c.logf("cache recovery: removing non-repository svn cache dir %s", cachePath)
@@ -157,6 +157,9 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 			}
 		}
 		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+			return false, 0, err
+		}
+		if err := bootstrap(ctx); err != nil {
 			return false, 0, err
 		}
 		args := buildSVNCloneArgs(authURL, cachePath, svnConfig, svnAuthArgs, authorArgs)
@@ -171,6 +174,10 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 		return false, time.Since(started), nil
 	}
 
+	if !cacheHit {
+		return cloneFresh()
+	}
+
 	restoreURL := sourceURL
 	if authURL != sourceURL {
 		if _, err := c.run(ctx, cachePath, "config", "svn-remote.svn.url", authURL); err != nil {
@@ -180,7 +187,29 @@ func (c *Client) EnsureSVNCheckout(ctx context.Context, sourceURL string, cacheP
 			_, _ = c.run(context.Background(), cachePath, "config", "svn-remote.svn.url", restoreURL)
 		}()
 	}
-	if _, err := c.runWithEnv(ctx, cachePath, env, buildSVNFetchArgs(svnAuthArgs, authorArgs)...); err != nil {
+	if err := bootstrap(ctx); err != nil {
+		return true, 0, err
+	}
+	fetchArgs := buildSVNFetchArgs(svnAuthArgs, authorArgs)
+	if _, err := c.runWithEnv(ctx, cachePath, env, fetchArgs...); err != nil {
+		if isSVNMetadataLockError(err) {
+			if c.logf != nil {
+				c.logf("cache recovery: removing stale svn metadata lock for %s", cachePath)
+			}
+			if clearErr := clearSVNMetadataLock(cachePath); clearErr != nil {
+				return true, 0, clearErr
+			}
+			if _, retryErr := c.runWithEnv(ctx, cachePath, env, fetchArgs...); retryErr != nil {
+				return true, 0, retryErr
+			}
+			return true, time.Since(started), nil
+		}
+		if isSVNLastRevConflictError(err) {
+			if c.logf != nil {
+				c.logf("cache recovery: rebuilding svn cache after last_rev conflict for %s", cachePath)
+			}
+			return cloneFresh()
+		}
 		return true, 0, err
 	}
 	return true, time.Since(started), nil
@@ -217,6 +246,14 @@ func (c *Client) PromoteSVNRefs(ctx context.Context, repoPath string, svnConfig 
 	}
 	if result.DefaultCommit == "" && result.DefaultBranch != "" {
 		result.DefaultCommit = c.ResolveRef(ctx, repoPath, "refs/heads/"+result.DefaultBranch)
+	}
+	if result.BranchCount == 0 && result.TagCount == 0 {
+		return SVNRefPromotionResult{}, fmt.Errorf(
+			"svn_import produced no Git branches or tags; check whether the repository matches the configured trunk/branches/tags layout (%s / %s / %s)",
+			defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk"),
+			defaultSVNLayoutPath(svnConfig.BranchesPath, "branches"),
+			defaultSVNLayoutPath(svnConfig.TagsPath, "tags"),
+		)
 	}
 	return result, nil
 }
@@ -603,28 +640,104 @@ func buildSVNFetchArgs(authArgs []string, authorArgs []string) []string {
 	return args
 }
 
-func prepareSVNAuth(rawURL string, credential *domain.Credential) (string, []string, []string, func(), error) {
+func prepareSVNAuth(rawURL string, credential *domain.Credential) (string, []string, []string, func(context.Context) error, func(), error) {
 	if credential == nil {
-		return rawURL, nil, nil, func() {}, nil
+		return rawURL, nil, nil, func(context.Context) error { return nil }, func() {}, nil
 	}
 	switch credential.Type {
 	case domain.CredentialTypeHTTPSToken, domain.CredentialTypeAPIToken:
 		parsed, err := url.Parse(strings.TrimSpace(rawURL))
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return rawURL, nil, nil, func() {}, nil
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "svn") {
+			return rawURL, nil, nil, func(context.Context) error { return nil }, func() {}, nil
 		}
 		username := strings.TrimSpace(credential.Username)
 		password := strings.TrimSpace(credential.Secret)
 		if username == "" || password == "" {
-			return "", nil, nil, nil, fmt.Errorf("svn http auth requires both username and password")
+			return "", nil, nil, nil, nil, fmt.Errorf("svn auth requires both username and password")
+		}
+		if parsed.Scheme == "svn" {
+			configDir, cleanup, err := createSVNConfigDir()
+			if err != nil {
+				return "", nil, nil, nil, nil, err
+			}
+			bootstrap := func(ctx context.Context) error {
+				return primeSVNAuth(ctx, rawURL, configDir, username, password)
+			}
+			return rawURL, nil, []string{"--username=" + username, "--config-dir=" + configDir}, bootstrap, cleanup, nil
 		}
 		parsed.User = url.UserPassword(username, password)
-		return parsed.String(), nil, []string{"--username=" + username}, func() {}, nil
+		return parsed.String(), nil, []string{"--username=" + username}, func(context.Context) error { return nil }, func() {}, nil
 	case domain.CredentialTypeSSHKey:
-		return "", nil, nil, nil, fmt.Errorf("svn_import does not support ssh_key credentials")
+		return "", nil, nil, nil, nil, fmt.Errorf("svn_import does not support ssh_key credentials")
 	default:
-		return rawURL, nil, nil, func() {}, nil
+		return rawURL, nil, nil, func(context.Context) error { return nil }, func() {}, nil
 	}
+}
+
+func createSVNConfigDir() (string, func(), error) {
+	configDir, err := os.MkdirTemp("", "reposync-svn-config-*")
+	if err != nil {
+		return "", nil, err
+	}
+	configContent := strings.Join([]string{
+		"[auth]",
+		"store-passwords = yes",
+		"store-plaintext-passwords = yes",
+		"store-auth-creds = yes",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(configDir, "config"), []byte(configContent), 0o600); err != nil {
+		_ = os.RemoveAll(configDir)
+		return "", nil, err
+	}
+	return configDir, func() { _ = os.RemoveAll(configDir) }, nil
+}
+
+func primeSVNAuth(ctx context.Context, rawURL string, configDir string, username string, password string) error {
+	args := []string{
+		"info",
+		rawURL,
+		"--config-dir", configDir,
+		"--username", username,
+		"--password", password,
+		"--non-interactive",
+	}
+	cmd := exec.CommandContext(ctx, "svn", args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("svn auth bootstrap failed: %s", sanitizeMessage(message))
+	}
+	return nil
+}
+
+func isSVNMetadataLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "could not lock config file .git/svn/.metadata") &&
+		strings.Contains(message, "file exists")
+}
+
+func isSVNLastRevConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "last_rev is higher!")
+}
+
+func clearSVNMetadataLock(repoPath string) error {
+	lockPath := filepath.Join(repoPath, ".git", "svn", ".metadata.lock")
+	if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func prepareSVNAuthorArgs(svnConfig domain.SVNConfig) ([]string, func(), error) {

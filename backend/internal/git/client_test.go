@@ -2,9 +2,11 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -83,7 +85,7 @@ func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
 }
 
 func TestPrepareSVNAuthInjectsUsernameAndPassword(t *testing.T) {
-	authURL, env, args, cleanup, err := prepareSVNAuth("https://svn.example.com/repos/demo", &domain.Credential{
+	authURL, env, args, bootstrap, cleanup, err := prepareSVNAuth("https://svn.example.com/repos/demo", &domain.Credential{
 		Type:     domain.CredentialTypeHTTPSToken,
 		Username: "svn-user",
 		Secret:   "svn-pass",
@@ -92,6 +94,9 @@ func TestPrepareSVNAuthInjectsUsernameAndPassword(t *testing.T) {
 		t.Fatalf("prepare svn auth: %v", err)
 	}
 	defer cleanup()
+	if err := bootstrap(context.Background()); err != nil {
+		t.Fatalf("expected no bootstrap for https auth, got %v", err)
+	}
 
 	if len(env) != 0 {
 		t.Fatalf("expected no env overrides, got %v", env)
@@ -101,6 +106,31 @@ func TestPrepareSVNAuthInjectsUsernameAndPassword(t *testing.T) {
 	}
 	if !strings.Contains(authURL, "svn-user:svn-pass@") {
 		t.Fatalf("expected password embedded in auth url, got %s", authURL)
+	}
+}
+
+func TestPrepareSVNAuthSupportsSVNProtocol(t *testing.T) {
+	authURL, env, args, bootstrap, cleanup, err := prepareSVNAuth("svn://svn.example.com/repos/demo", &domain.Credential{
+		Type:     domain.CredentialTypeHTTPSToken,
+		Username: "svn-user",
+		Secret:   "svn-pass",
+	})
+	if err != nil {
+		t.Fatalf("prepare svn auth: %v", err)
+	}
+	defer cleanup()
+	if bootstrap == nil {
+		t.Fatal("expected bootstrap func for svn protocol auth")
+	}
+
+	if len(env) != 0 {
+		t.Fatalf("expected no env overrides, got %v", env)
+	}
+	if len(args) != 2 || args[0] != "--username=svn-user" || !strings.HasPrefix(args[1], "--config-dir=") {
+		t.Fatalf("expected svn username arg, got %v", args)
+	}
+	if authURL != "svn://svn.example.com/repos/demo" {
+		t.Fatalf("expected svn url to stay unchanged, got %s", authURL)
 	}
 }
 
@@ -124,8 +154,39 @@ func TestStreamPipeSplitsCarriageReturnProgressLines(t *testing.T) {
 	}
 }
 
+func TestIsSVNMetadataLockError(t *testing.T) {
+	err := errors.New("error: could not lock config file .git/svn/.metadata: File exists")
+	if !isSVNMetadataLockError(err) {
+		t.Fatal("expected svn metadata lock error to be detected")
+	}
+}
+
+func TestIsSVNLastRevConflictError(t *testing.T) {
+	err := errors.New("last_rev is higher!: 192800 >= 192800 at C:/Program Files/Git/mingw64/share/perl5/Git/SVN/Ra.pm line 493.")
+	if !isSVNLastRevConflictError(err) {
+		t.Fatal("expected svn last_rev conflict to be detected")
+	}
+}
+
+func TestClearSVNMetadataLockRemovesLockFile(t *testing.T) {
+	root := t.TempDir()
+	lockPath := filepath.Join(root, ".git", "svn", ".metadata.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	if err := os.WriteFile(lockPath, []byte("lock"), 0o644); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+	if err := clearSVNMetadataLock(root); err != nil {
+		t.Fatalf("clear lock: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("expected lock file to be removed, got %v", err)
+	}
+}
+
 func TestPrepareSVNAuthRejectsMissingUsernameOrPassword(t *testing.T) {
-	_, _, _, cleanup, err := prepareSVNAuth("https://svn.example.com/repos/demo", &domain.Credential{
+	_, _, _, _, cleanup, err := prepareSVNAuth("https://svn.example.com/repos/demo", &domain.Credential{
 		Type:     domain.CredentialTypeHTTPSToken,
 		Username: "svn-user",
 		Secret:   "",
@@ -222,5 +283,37 @@ func TestClassifySVNRemoteRef(t *testing.T) {
 				t.Fatalf("expected (%s, %s), got (%s, %s)", tc.kind, tc.name, kind, name)
 			}
 		})
+	}
+}
+
+func TestPromoteSVNRefsFailsWhenNoRefsMatchConfiguredLayout(t *testing.T) {
+	client := NewClient("git")
+	root := t.TempDir()
+
+	if _, err := client.run(context.Background(), "", "init", root); err != nil {
+		t.Fatalf("init repo: %v", err)
+	}
+	samplePath := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(samplePath, []byte("sample\n"), 0o644); err != nil {
+		t.Fatalf("write sample file: %v", err)
+	}
+	objectID, err := client.run(context.Background(), root, "hash-object", "-w", samplePath)
+	if err != nil {
+		t.Fatalf("hash object: %v", err)
+	}
+	if _, err := client.run(context.Background(), root, "update-ref", "refs/remotes/origin/unknown", strings.TrimSpace(objectID)); err != nil {
+		t.Fatalf("update ref: %v", err)
+	}
+
+	_, err = client.PromoteSVNRefs(context.Background(), root, domain.SVNConfig{
+		TrunkPath:    "trunk",
+		BranchesPath: "branches",
+		TagsPath:     "tags",
+	})
+	if err == nil {
+		t.Fatal("expected promote refs to fail when nothing matches")
+	}
+	if !strings.Contains(err.Error(), "produced no Git branches or tags") {
+		t.Fatalf("expected explicit no-refs error, got %v", err)
 	}
 }
