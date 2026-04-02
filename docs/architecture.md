@@ -157,7 +157,7 @@ flowchart LR
 - 执行实现基于系统 `git svn` 命令，不与现有 `git mirror` 流程混用
 - `svn_import` 任务会把 SVN 历史持续拉取到本地，再推送到目标 Git 仓库
 - 首版只支持标准 `trunk / branches / tags` 布局
-- 首版只支持 `HTTP / HTTPS` 方式访问 SVN
+- 首版支持 `HTTP / HTTPS / SVN` 方式访问 SVN
 - 目标 Git 仓库定位为只读镜像，不支持人工改写后继续增量同步
 
 `svn_import` 执行链路规划如下：

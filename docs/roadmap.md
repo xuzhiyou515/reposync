@@ -146,7 +146,7 @@
 - 新增任务类型 `svn_import`
 - 基于 `git svn` 实现持续同步
 - 只支持标准 `trunk / branches / tags` 布局
-- 只支持 `HTTP / HTTPS` 方式访问 SVN
+- 支持 `HTTP / HTTPS / SVN` 方式访问 SVN
 - 目标 Git 仓库必须作为只读镜像使用
 - 复用现有 GitHub / Gogs / 本地 bare 自动建仓能力
 - 首版只支持手动执行和定时调度，不支持 SVN Webhook

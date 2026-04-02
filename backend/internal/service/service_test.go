@@ -356,6 +356,38 @@ func TestSaveTaskDefaultsSVNLayoutPaths(t *testing.T) {
 	}
 }
 
+func TestSaveTaskAllowsSVNProtocolSourceURL(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:       domain.TaskTypeSVNImport,
+		Name:           "svn-protocol-import",
+		SourceRepoURL:  "svn://svn.example.com/repos/project",
+		TargetRepoURL:  "https://target.example.com/org/repo.git",
+		Enabled:        true,
+		SyncAllRefs:    true,
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if task.ID == 0 {
+		t.Fatalf("expected saved task id, got %d", task.ID)
+	}
+	if task.SVNConfig.AuthorDomain != "svn.example.com" {
+		t.Fatalf("expected default svn author domain from source host, got %q", task.SVNConfig.AuthorDomain)
+	}
+}
+
 func TestRunTaskMirrorsAllRefsAndReusesCache(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is required for integration test")

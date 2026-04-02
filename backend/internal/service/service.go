@@ -78,8 +78,8 @@ func (s *Service) validateTask(ctx context.Context, task domain.SyncTask) error 
 		return fmt.Errorf("unsupported submoduleRewriteProtocol %q", task.SubmoduleRewriteProtocol)
 	}
 	if task.TaskType == domain.TaskTypeSVNImport {
-		if !isHTTPRepoURL(task.SourceRepoURL) {
-			return fmt.Errorf("svn_import sourceRepoUrl must use http/https")
+		if !isSupportedSVNRepoURL(task.SourceRepoURL) {
+			return fmt.Errorf("svn_import sourceRepoUrl must use http/https/svn")
 		}
 		if task.RecursiveSubmodules {
 			return fmt.Errorf("svn_import does not support recursiveSubmodules")
@@ -116,6 +116,19 @@ func isHTTPRepoURL(raw string) bool {
 	}
 	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
 	case "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedSVNRepoURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+	case "http", "https", "svn":
 		return true
 	default:
 		return false

@@ -152,7 +152,7 @@ const repositoryValueValidator = (_rule: unknown, value: string, callback: (erro
     return
   }
   const looksLikeRepo =
-    /^(https?:\/\/|ssh:\/\/|git@|file:\/\/)/.test(trimmed) ||
+    /^(https?:\/\/|ssh:\/\/|svn:\/\/|git@|file:\/\/)/.test(trimmed) ||
     /^[A-Za-z]:\\/.test(trimmed) ||
     trimmed.startsWith('/') ||
     trimmed.startsWith('./') ||
@@ -1462,7 +1462,7 @@ onBeforeUnmount(() => {
               <el-form-item label="源仓库 URL" prop="sourceRepoUrl">
                 <el-input
                   v-model="taskForm.sourceRepoUrl"
-                  :placeholder="taskFormIsSVNImport ? 'https://svn.example.com/repos/project' : 'git@github.com:org/repo.git'"
+                  :placeholder="taskFormIsSVNImport ? 'https://svn.example.com/repos/project 或 svn://svn.example.com/repos/project' : 'git@github.com:org/repo.git'"
                 />
               </el-form-item>
               <el-form-item label="目标仓库 URL" prop="targetRepoUrl">

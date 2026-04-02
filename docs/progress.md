@@ -121,7 +121,7 @@
 - 已确认 `SVN -> Git` 会作为独立任务类型推进
 - 首版仅支持标准 `trunk / branches / tags`
 - 目标 Git 仓库必须作为只读镜像使用
-- 首版 SVN 认证范围限定为 `HTTP / HTTPS`
+- 首版 SVN 认证范围限定为 `HTTP / HTTPS / SVN`
 - 执行实现基于 `git svn`
 - 计划支持可选 `authors.txt`、真实 Git tag 映射和手动/定时触发
 
