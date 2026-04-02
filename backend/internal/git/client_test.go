@@ -134,6 +134,34 @@ func TestPrepareSVNAuthSupportsSVNProtocol(t *testing.T) {
 	}
 }
 
+func TestBuildSVNCloneArgsSupportsSingleDirectoryLayout(t *testing.T) {
+	args := buildSVNCloneArgs("svn://svn.example.com/repos/demo", "D:/cache/demo", domain.SVNConfig{
+		TrunkPath:    ".",
+		BranchesPath: "",
+		TagsPath:     "",
+	}, []string{"--username=svn-user"}, []string{"--authors-prog=D:/authors.cmd"})
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--trunk=") {
+		t.Fatalf("expected single-directory layout to omit --trunk, got %s", joined)
+	}
+	if strings.Contains(joined, "--branches=") {
+		t.Fatalf("expected single-directory layout to omit --branches, got %s", joined)
+	}
+	if strings.Contains(joined, "--tags=") {
+		t.Fatalf("expected single-directory layout to omit --tags, got %s", joined)
+	}
+	for _, expected := range []string{
+		"svn clone",
+		"--prefix=svn/",
+		"--username=svn-user",
+		"--authors-prog=D:/authors.cmd",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected args to contain %q, got %s", expected, joined)
+		}
+	}
+}
+
 func TestStreamPipeSplitsCarriageReturnProgressLines(t *testing.T) {
 	client := &Client{}
 	input := io.NopCloser(strings.NewReader("progress 1\rprogress 2\rfinal line\n"))
@@ -219,7 +247,7 @@ func TestPrepareSVNAuthorArgsUsesAuthorsFileWhenProvided(t *testing.T) {
 
 func TestPrepareSVNAuthorArgsFallsBackToAuthorsProg(t *testing.T) {
 	args, cleanup, err := prepareSVNAuthorArgs(domain.SVNConfig{
-		AuthorDomain: "svn.example.com",
+		AuthorDomain: "@svn.example.com",
 	})
 	if err != nil {
 		t.Fatalf("prepare authors args: %v", err)
@@ -234,6 +262,24 @@ func TestPrepareSVNAuthorArgsFallsBackToAuthorsProg(t *testing.T) {
 	cleanup()
 	if _, statErr := os.Stat(progPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected authors prog to be removed, got %v", statErr)
+	}
+}
+
+func TestNormalizeSVNAuthorEmailSuffix(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{input: "", expected: ""},
+		{input: "svn.example.com", expected: "@svn.example.com"},
+		{input: "@corp.example.com", expected: "@corp.example.com"},
+		{input: " +svn@corp.example.com ", expected: "+svn@corp.example.com"},
+	}
+
+	for _, tc := range cases {
+		if got := normalizeSVNAuthorEmailSuffix(tc.input); got != tc.expected {
+			t.Fatalf("normalize suffix %q: expected %q, got %q", tc.input, tc.expected, got)
+		}
 	}
 }
 
@@ -283,6 +329,17 @@ func TestClassifySVNRemoteRef(t *testing.T) {
 				t.Fatalf("expected (%s, %s), got (%s, %s)", tc.kind, tc.name, kind, name)
 			}
 		})
+	}
+}
+
+func TestClassifySVNRemoteRefForSingleDirectoryLayout(t *testing.T) {
+	kind, name := classifySVNRemoteRef("svn/git-svn", domain.SVNConfig{
+		TrunkPath:    ".",
+		BranchesPath: "",
+		TagsPath:     "",
+	})
+	if kind != "branch" || name != "trunk" {
+		t.Fatalf("expected single-directory layout to map git-svn to trunk branch, got (%s, %s)", kind, name)
 	}
 }
 

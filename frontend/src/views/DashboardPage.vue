@@ -102,6 +102,21 @@ const credentialTypeOptions: Array<{ label: string; value: Credential['type'] }>
 ]
 const taskFormIsSVNImport = computed(() => taskForm.taskType === 'svn_import')
 const isEditingCredential = computed(() => Boolean(credentialForm.id))
+
+const coalesceLayoutValue = (value: string | undefined, fallback: string) => (value === undefined ? fallback : value)
+const formatSVNLayoutValue = (value: string | undefined, fallback: string) => {
+  const resolved = coalesceLayoutValue(value, fallback).trim()
+  if (!resolved) {
+    return '(无)'
+  }
+  if (resolved === '.' || resolved === '/') {
+    return '根目录'
+  }
+  return resolved
+}
+const formatSVNLayoutSummary = (svnConfig?: SyncTask['svnConfig']) =>
+  `${formatSVNLayoutValue(svnConfig?.trunkPath, 'trunk')} / ${formatSVNLayoutValue(svnConfig?.branchesPath, 'branches')} / ${formatSVNLayoutValue(svnConfig?.tagsPath, 'tags')}`
+
 const credentialTypeLabelMap: Record<NonNullable<Credential['type']>, string> = {
   https_token: 'SVN / Git HTTP 用户名密码',
   api_token: '平台 API Token',
@@ -240,7 +255,7 @@ const taskFormTriggerCards = computed(() => [
   {
     label: taskFormIsSVNImport.value ? 'SVN 布局' : '镜像范围',
     value: taskFormIsSVNImport.value
-      ? `${taskForm.svnConfig?.trunkPath || 'trunk'} / ${taskForm.svnConfig?.branchesPath || 'branches'} / ${taskForm.svnConfig?.tagsPath || 'tags'}`
+      ? formatSVNLayoutSummary(taskForm.svnConfig)
       : taskForm.syncAllRefs ? '全部 refs' : '自定义',
   },
 ])
@@ -311,11 +326,11 @@ const selectedExecutionStats = computed(() => {
     stats.push(
       {
         label: 'SVN 布局',
-        value: `${task.svnConfig.trunkPath || 'trunk'} / ${task.svnConfig.branchesPath || 'branches'} / ${task.svnConfig.tagsPath || 'tags'}`,
+        value: formatSVNLayoutSummary(task.svnConfig),
       },
       {
         label: '作者映射',
-        value: task.svnConfig.authorsFilePath ? 'authors.txt' : `自动映射 @${task.svnConfig.authorDomain || 'svn.local'}`,
+        value: task.svnConfig.authorsFilePath ? 'authors.txt' : `自动映射到 <author>${task.svnConfig.authorDomain || '@svn.local'}`,
       },
     )
   }
@@ -335,12 +350,12 @@ const selectedExecutionConfigRows = computed(() => {
   ]
   if (task.taskType === 'svn_import') {
     rows.push(
-      { label: 'Trunk', value: task.svnConfig.trunkPath || 'trunk' },
-      { label: 'Branches', value: task.svnConfig.branchesPath || 'branches' },
-      { label: 'Tags', value: task.svnConfig.tagsPath || 'tags' },
+      { label: 'Trunk', value: formatSVNLayoutValue(task.svnConfig.trunkPath, 'trunk') },
+      { label: 'Branches', value: formatSVNLayoutValue(task.svnConfig.branchesPath, 'branches') },
+      { label: 'Tags', value: formatSVNLayoutValue(task.svnConfig.tagsPath, 'tags') },
       {
         label: '作者映射',
-        value: task.svnConfig.authorsFilePath || `自动映射到 ${task.svnConfig.authorDomain || 'svn.local'}`,
+        value: task.svnConfig.authorsFilePath || `自动映射到 <author>${task.svnConfig.authorDomain || '@svn.local'}`,
       },
     )
   } else {
@@ -591,11 +606,11 @@ const editTask = (task: SyncTask) => {
   Object.assign(taskForm, JSON.parse(JSON.stringify(task)))
   taskForm.taskType = taskForm.taskType || 'git_mirror'
   taskForm.svnConfig = {
-    trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
-    branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
-    tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
-    authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
-    authorDomain: taskForm.svnConfig?.authorDomain || '',
+    trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
+    branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
+    tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+    authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
+    authorDomain: taskForm.svnConfig?.authorDomain ?? '',
   }
   taskDialogVisible.value = true
   void nextTick(() => taskFormRef.value?.clearValidate())
@@ -663,20 +678,20 @@ watch(
       taskForm.syncAllRefs = true
       taskForm.submoduleRewriteProtocol = 'inherit'
       taskForm.svnConfig = {
-        trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
-        branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
-        tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
-        authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
-        authorDomain: taskForm.svnConfig?.authorDomain || '',
+        trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
+        branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
+        tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+        authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
+        authorDomain: taskForm.svnConfig?.authorDomain ?? '',
       }
       return
     }
     taskForm.svnConfig = {
-      trunkPath: taskForm.svnConfig?.trunkPath || 'trunk',
-      branchesPath: taskForm.svnConfig?.branchesPath || 'branches',
-      tagsPath: taskForm.svnConfig?.tagsPath || 'tags',
-      authorsFilePath: taskForm.svnConfig?.authorsFilePath || '',
-      authorDomain: taskForm.svnConfig?.authorDomain || '',
+      trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
+      branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
+      tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+      authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
+      authorDomain: taskForm.svnConfig?.authorDomain ?? '',
     }
   },
 )
@@ -1478,29 +1493,29 @@ onBeforeUnmount(() => {
         <section v-if="taskFormIsSVNImport" class="form-section">
           <div class="form-section-header">
             <strong>SVN 导入配置</strong>
-            <span>当前只支持标准 `trunk / branches / tags` 布局，后续执行器会直接复用这些路径。</span>
+            <span>支持标准 `trunk / branches / tags`，也支持仓库根目录布局：`Trunk=.` 且 `Branches/Tags` 留空。</span>
           </div>
           <div class="form-section-body">
             <div class="two-column form-grid-wide">
               <el-form-item label="Trunk 路径">
-                <el-input v-model="taskForm.svnConfig!.trunkPath" />
+                <el-input v-model="taskForm.svnConfig!.trunkPath" placeholder="标准布局填 trunk；仓库根目录填 ." />
               </el-form-item>
               <el-form-item label="Branches 路径">
-                <el-input v-model="taskForm.svnConfig!.branchesPath" />
+                <el-input v-model="taskForm.svnConfig!.branchesPath" placeholder="标准布局填 branches；无分支可留空" />
               </el-form-item>
             </div>
             <div class="two-column form-grid-wide">
               <el-form-item label="Tags 路径">
-                <el-input v-model="taskForm.svnConfig!.tagsPath" />
+                <el-input v-model="taskForm.svnConfig!.tagsPath" placeholder="标准布局填 tags；无标签可留空" />
               </el-form-item>
               <el-form-item label="authors.txt 文件">
                 <el-input v-model="taskForm.svnConfig!.authorsFilePath" placeholder="可选，本地文件路径" />
               </el-form-item>
             </div>
             <div class="two-column form-grid-wide">
-              <el-form-item label="默认作者域名">
-                <el-input v-model="taskForm.svnConfig!.authorDomain" placeholder="留空时默认使用 SVN 主机名" />
-                <div class="field-help">当未提供 `authors.txt` 时，会把 SVN 作者映射为 `name &lt;name@domain&gt;`。</div>
+              <el-form-item label="邮箱后缀">
+                <el-input v-model="taskForm.svnConfig!.authorDomain" placeholder="例如：@company.com，留空时默认使用 @svn.local" />
+                <div class="field-help">当未提供 `authors.txt` 时，会把 SVN 作者自动映射为 `name &lt;name{suffix}&gt;`。</div>
               </el-form-item>
             </div>
           </div>

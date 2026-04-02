@@ -306,16 +306,17 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 	_ = json.Unmarshal([]byte(providerJSON), &task.ProviderConfig)
 	_ = json.Unmarshal([]byte(svnConfigJSON), &task.SVNConfig)
 	if task.TaskType == domain.TaskTypeSVNImport {
-		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
+		task.SVNConfig.TrunkPath = strings.TrimSpace(task.SVNConfig.TrunkPath)
+		task.SVNConfig.BranchesPath = strings.TrimSpace(task.SVNConfig.BranchesPath)
+		task.SVNConfig.TagsPath = strings.TrimSpace(task.SVNConfig.TagsPath)
+		task.SVNConfig.AuthorsFilePath = strings.TrimSpace(task.SVNConfig.AuthorsFilePath)
+		task.SVNConfig.AuthorDomain = strings.TrimSpace(task.SVNConfig.AuthorDomain)
+		if task.SVNConfig.TrunkPath == "" && task.SVNConfig.BranchesPath == "" && task.SVNConfig.TagsPath == "" {
 			task.SVNConfig.TrunkPath = "trunk"
-		}
-		if strings.TrimSpace(task.SVNConfig.BranchesPath) == "" {
 			task.SVNConfig.BranchesPath = "branches"
-		}
-		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
 			task.SVNConfig.TagsPath = "tags"
 		}
-		if strings.TrimSpace(task.SVNConfig.AuthorDomain) == "" {
+		if task.SVNConfig.AuthorDomain == "" {
 			task.SVNConfig.AuthorDomain = "svn.local"
 		}
 	}
@@ -349,16 +350,17 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 		task.ProviderConfig.Visibility = domain.VisibilityPrivate
 	}
 	if task.TaskType == domain.TaskTypeSVNImport {
-		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
+		task.SVNConfig.TrunkPath = strings.TrimSpace(task.SVNConfig.TrunkPath)
+		task.SVNConfig.BranchesPath = strings.TrimSpace(task.SVNConfig.BranchesPath)
+		task.SVNConfig.TagsPath = strings.TrimSpace(task.SVNConfig.TagsPath)
+		task.SVNConfig.AuthorsFilePath = strings.TrimSpace(task.SVNConfig.AuthorsFilePath)
+		task.SVNConfig.AuthorDomain = strings.TrimSpace(task.SVNConfig.AuthorDomain)
+		if task.SVNConfig.TrunkPath == "" && task.SVNConfig.BranchesPath == "" && task.SVNConfig.TagsPath == "" {
 			task.SVNConfig.TrunkPath = "trunk"
-		}
-		if strings.TrimSpace(task.SVNConfig.BranchesPath) == "" {
 			task.SVNConfig.BranchesPath = "branches"
-		}
-		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
 			task.SVNConfig.TagsPath = "tags"
 		}
-		if strings.TrimSpace(task.SVNConfig.AuthorDomain) == "" {
+		if task.SVNConfig.AuthorDomain == "" {
 			task.SVNConfig.AuthorDomain = "svn.local"
 		}
 	}

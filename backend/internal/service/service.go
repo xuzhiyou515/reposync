@@ -52,16 +52,17 @@ func normalizeTask(task domain.SyncTask) domain.SyncTask {
 		task.SubmoduleRewriteProtocol = domain.SubmoduleRewriteProtocolInherit
 	}
 	if task.TaskType == domain.TaskTypeSVNImport {
-		if strings.TrimSpace(task.SVNConfig.TrunkPath) == "" {
+		task.SVNConfig.TrunkPath = strings.TrimSpace(task.SVNConfig.TrunkPath)
+		task.SVNConfig.BranchesPath = strings.TrimSpace(task.SVNConfig.BranchesPath)
+		task.SVNConfig.TagsPath = strings.TrimSpace(task.SVNConfig.TagsPath)
+		task.SVNConfig.AuthorsFilePath = strings.TrimSpace(task.SVNConfig.AuthorsFilePath)
+		task.SVNConfig.AuthorDomain = strings.TrimSpace(task.SVNConfig.AuthorDomain)
+		if task.SVNConfig.TrunkPath == "" && task.SVNConfig.BranchesPath == "" && task.SVNConfig.TagsPath == "" {
 			task.SVNConfig.TrunkPath = "trunk"
-		}
-		if strings.TrimSpace(task.SVNConfig.BranchesPath) == "" {
 			task.SVNConfig.BranchesPath = "branches"
-		}
-		if strings.TrimSpace(task.SVNConfig.TagsPath) == "" {
 			task.SVNConfig.TagsPath = "tags"
 		}
-		if strings.TrimSpace(task.SVNConfig.AuthorDomain) == "" {
+		if task.SVNConfig.AuthorDomain == "" {
 			task.SVNConfig.AuthorDomain = defaultSVNAuthorDomain(task.SourceRepoURL)
 		}
 	}
@@ -372,11 +373,20 @@ func (s *Service) SubscribeExecution(ctx context.Context, executionID int64) (do
 	return detail, nil, func() {}, nil
 }
 
-func buildCacheKey(taskType domain.TaskType, source, target string) string {
+func buildCacheKey(taskType domain.TaskType, source, target string, svnConfig ...domain.SVNConfig) string {
 	if taskType == "" {
 		taskType = domain.TaskTypeGitMirror
 	}
-	sum := sha1.Sum([]byte(string(taskType) + "|" + source + "|" + target))
+	parts := []string{string(taskType), source, target}
+	if taskType == domain.TaskTypeSVNImport && len(svnConfig) > 0 {
+		config := svnConfig[0]
+		parts = append(parts,
+			strings.TrimSpace(config.TrunkPath),
+			strings.TrimSpace(config.BranchesPath),
+			strings.TrimSpace(config.TagsPath),
+		)
+	}
+	sum := sha1.Sum([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -670,7 +680,7 @@ func (s *Service) syncSVNRepository(ctx context.Context, gitClient *git.Client, 
 	}
 
 	now := time.Now().UTC()
-	cacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL)
+	cacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL, task.SVNConfig)
 	cacheHit := false
 	hitCount := 1
 	var existingCache *domain.RepoCache
@@ -813,7 +823,7 @@ func (s *Service) syncRepository(ctx context.Context, gitClient *git.Client, exe
 	logger.log(ctx, "Syncing %s from %s to %s", nodeLabel, sourceRepoURL, targetRepoURL)
 
 	now := time.Now().UTC()
-	cacheKey := buildCacheKey(task.TaskType, sourceRepoURL, targetRepoURL)
+	cacheKey := buildCacheKey(task.TaskType, sourceRepoURL, targetRepoURL, task.SVNConfig)
 	cacheHit := false
 	hitCount := 1
 	var existingCache *domain.RepoCache

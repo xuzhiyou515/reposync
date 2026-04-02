@@ -32,6 +32,22 @@ func TestBuildCacheKeySeparatesTaskTypes(t *testing.T) {
 	}
 }
 
+func TestBuildCacheKeySeparatesSVNLayouts(t *testing.T) {
+	rootLayoutKey := buildCacheKey(domain.TaskTypeSVNImport, "source", "target", domain.SVNConfig{
+		TrunkPath:    ".",
+		BranchesPath: "",
+		TagsPath:     "",
+	})
+	standardLayoutKey := buildCacheKey(domain.TaskTypeSVNImport, "source", "target", domain.SVNConfig{
+		TrunkPath:    "trunk",
+		BranchesPath: "branches",
+		TagsPath:     "tags",
+	})
+	if rootLayoutKey == standardLayoutKey {
+		t.Fatalf("expected cache keys to differ across svn layouts")
+	}
+}
+
 func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -385,6 +401,40 @@ func TestSaveTaskAllowsSVNProtocolSourceURL(t *testing.T) {
 	}
 	if task.SVNConfig.AuthorDomain != "svn.example.com" {
 		t.Fatalf("expected default svn author domain from source host, got %q", task.SVNConfig.AuthorDomain)
+	}
+}
+
+func TestSaveTaskPreservesSingleDirectorySVNLayout(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-root-layout",
+		SourceRepoURL: "svn://svn.example.com/repos/project",
+		TargetRepoURL: "https://target.example.com/org/repo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		SVNConfig: domain.SVNConfig{
+			TrunkPath:    ".",
+			BranchesPath: "",
+			TagsPath:     "",
+		},
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if task.SVNConfig.TrunkPath != "." || task.SVNConfig.BranchesPath != "" || task.SVNConfig.TagsPath != "" {
+		t.Fatalf("expected single-directory svn layout to be preserved, got %+v", task.SVNConfig)
 	}
 }
 

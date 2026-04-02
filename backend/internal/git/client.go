@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -250,9 +249,9 @@ func (c *Client) PromoteSVNRefs(ctx context.Context, repoPath string, svnConfig 
 	if result.BranchCount == 0 && result.TagCount == 0 {
 		return SVNRefPromotionResult{}, fmt.Errorf(
 			"svn_import produced no Git branches or tags; check whether the repository matches the configured trunk/branches/tags layout (%s / %s / %s)",
-			defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk"),
-			defaultSVNLayoutPath(svnConfig.BranchesPath, "branches"),
-			defaultSVNLayoutPath(svnConfig.TagsPath, "tags"),
+			describeSVNLayoutPath(svnConfig.TrunkPath, "trunk"),
+			describeSVNLayoutPath(svnConfig.BranchesPath, "(none)"),
+			describeSVNLayoutPath(svnConfig.TagsPath, "(none)"),
 		)
 	}
 	return result, nil
@@ -624,9 +623,15 @@ func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNC
 	args := []string{
 		"svn", "clone", sourceURL, cachePath,
 		"--prefix=svn/",
-		"--trunk=" + defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk"),
-		"--branches=" + defaultSVNLayoutPath(svnConfig.BranchesPath, "branches"),
-		"--tags=" + defaultSVNLayoutPath(svnConfig.TagsPath, "tags"),
+	}
+	if !isSVNSingleDirectoryLayout(svnConfig.TrunkPath) {
+		args = append(args, "--trunk="+defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk"))
+	}
+	if branchesPath := optionalSVNLayoutPath(svnConfig.BranchesPath); branchesPath != "" {
+		args = append(args, "--branches="+branchesPath)
+	}
+	if tagsPath := optionalSVNLayoutPath(svnConfig.TagsPath); tagsPath != "" {
+		args = append(args, "--tags="+tagsPath)
 	}
 	args = append(args, authArgs...)
 	args = append(args, authorArgs...)
@@ -744,47 +749,33 @@ func prepareSVNAuthorArgs(svnConfig domain.SVNConfig) ([]string, func(), error) 
 	if strings.TrimSpace(svnConfig.AuthorsFilePath) != "" {
 		return []string{"--authors-file=" + svnConfig.AuthorsFilePath}, func() {}, nil
 	}
-	domain := strings.TrimSpace(svnConfig.AuthorDomain)
-	if domain == "" {
-		domain = "svn.local"
+	emailSuffix := normalizeSVNAuthorEmailSuffix(svnConfig.AuthorDomain)
+	if emailSuffix == "" {
+		emailSuffix = "@svn.local"
 	}
-	progPath, cleanup, err := createSVNAuthorsProg(domain)
+	progPath, cleanup, err := createSVNAuthorsProg(emailSuffix)
 	if err != nil {
 		return nil, nil, err
 	}
 	return []string{"--authors-prog=" + progPath}, cleanup, nil
 }
 
-func createSVNAuthorsProg(domain string) (string, func(), error) {
-	safeDomain := strings.TrimSpace(domain)
-	if safeDomain == "" {
-		safeDomain = "svn.local"
+func normalizeSVNAuthorEmailSuffix(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
 	}
-	if runtime.GOOS == "windows" {
-		file, err := os.CreateTemp("", "reposync-authors-*.cmd")
-		if err != nil {
-			return "", nil, err
-		}
-		path := file.Name()
-		content := strings.Join([]string{
-			"@echo off",
-			"set USERNAME=%~1",
-			"if \"%USERNAME%\"==\"\" exit /b 1",
-			fmt.Sprintf("echo %%USERNAME%% = %%USERNAME%% ^<%%USERNAME%%@%s^>", safeDomain),
-			"",
-		}, "\r\n")
-		if _, err := file.WriteString(content); err != nil {
-			_ = file.Close()
-			_ = os.Remove(path)
-			return "", nil, err
-		}
-		if err := file.Close(); err != nil {
-			_ = os.Remove(path)
-			return "", nil, err
-		}
-		return path, func() { _ = os.Remove(path) }, nil
+	if strings.Contains(trimmed, "@") {
+		return trimmed
 	}
+	return "@" + trimmed
+}
 
+func createSVNAuthorsProg(emailSuffix string) (string, func(), error) {
+	safeSuffix := strings.TrimSpace(emailSuffix)
+	if safeSuffix == "" {
+		safeSuffix = "@svn.local"
+	}
 	file, err := os.CreateTemp("", "reposync-authors-*.sh")
 	if err != nil {
 		return "", nil, err
@@ -794,7 +785,7 @@ func createSVNAuthorsProg(domain string) (string, func(), error) {
 		"#!/bin/sh",
 		`username="$1"`,
 		`[ -n "$username" ] || exit 1`,
-		fmt.Sprintf(`printf '%%s = %%s <%%s@%s>\n' "$username" "$username" "$username"`, safeDomain),
+		fmt.Sprintf(`printf '%%s = %%s <%%s%s>\n' "$username" "$username" "$username"`, safeSuffix),
 		"",
 	}, "\n")
 	if _, err := file.WriteString(content); err != nil {
@@ -810,7 +801,7 @@ func createSVNAuthorsProg(domain string) (string, func(), error) {
 		_ = os.Remove(path)
 		return "", nil, err
 	}
-	return path, func() { _ = os.Remove(path) }, nil
+	return filepath.ToSlash(path), func() { _ = os.Remove(path) }, nil
 }
 
 func defaultSVNLayoutPath(value string, fallback string) string {
@@ -821,7 +812,33 @@ func defaultSVNLayoutPath(value string, fallback string) string {
 	return trimmed
 }
 
+func optionalSVNLayoutPath(value string) string {
+	return strings.Trim(strings.TrimSpace(value), "/")
+}
+
+func describeSVNLayoutPath(value string, fallback string) string {
+	if isSVNSingleDirectoryLayout(value) {
+		return "."
+	}
+	if trimmed := optionalSVNLayoutPath(value); trimmed != "" {
+		return trimmed
+	}
+	return fallback
+}
+
+func isSVNSingleDirectoryLayout(trunkPath string) bool {
+	switch strings.TrimSpace(trunkPath) {
+	case ".", "/":
+		return true
+	default:
+		return false
+	}
+}
+
 func trunkBranchName(trunkPath string) string {
+	if isSVNSingleDirectoryLayout(trunkPath) {
+		return "trunk"
+	}
 	normalized := strings.ReplaceAll(defaultSVNLayoutPath(trunkPath, "trunk"), "\\", "/")
 	parts := strings.Split(normalized, "/")
 	return parts[len(parts)-1]
@@ -834,16 +851,21 @@ func classifySVNRemoteRef(refName string, svnConfig domain.SVNConfig) (string, s
 	}
 	trimmed := strings.TrimPrefix(name, "svn/")
 	normalizedTrunk := defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk")
-	normalizedBranches := defaultSVNLayoutPath(svnConfig.BranchesPath, "branches")
-	normalizedTags := defaultSVNLayoutPath(svnConfig.TagsPath, "tags")
+	normalizedBranches := optionalSVNLayoutPath(svnConfig.BranchesPath)
+	normalizedTags := optionalSVNLayoutPath(svnConfig.TagsPath)
 
-	if trimmed == normalizedTrunk || name == normalizedTrunk {
+	if isSVNSingleDirectoryLayout(svnConfig.TrunkPath) {
+		if trimmed == "git-svn" || name == "git-svn" {
+			return "branch", trunkBranchName(svnConfig.TrunkPath)
+		}
+	} else if trimmed == normalizedTrunk || name == normalizedTrunk {
 		return "branch", trunkBranchName(svnConfig.TrunkPath)
 	}
-	if strings.HasPrefix(trimmed, normalizedBranches+"/") {
+
+	if normalizedBranches != "" && strings.HasPrefix(trimmed, normalizedBranches+"/") {
 		return "branch", strings.TrimPrefix(trimmed, normalizedBranches+"/")
 	}
-	if strings.HasPrefix(trimmed, normalizedTags+"/") {
+	if normalizedTags != "" && strings.HasPrefix(trimmed, normalizedTags+"/") {
 		return "tag", strings.TrimPrefix(trimmed, normalizedTags+"/")
 	}
 	if strings.HasPrefix(name, "tags/") {

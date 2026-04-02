@@ -178,6 +178,41 @@ func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
 	}
 }
 
+func TestTaskRoundTripWithSVNSingleDirectoryLayout(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reposync.db")
+	db, err := New(dbPath, security.NewSecretBox("test-secret"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	task, err := db.SaveTask(ctx, domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-root-layout",
+		SourceRepoURL: "svn://svn.example.com/repos/demo",
+		TargetRepoURL: "https://git.example.com/mirror/demo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGitHub,
+			Visibility: domain.VisibilityPrivate,
+		},
+		SVNConfig: domain.SVNConfig{
+			TrunkPath:    ".",
+			BranchesPath: "",
+			TagsPath:     "",
+			AuthorDomain: "svn.example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if task.SVNConfig.TrunkPath != "." || task.SVNConfig.BranchesPath != "" || task.SVNConfig.TagsPath != "" {
+		t.Fatalf("expected single-directory layout to round trip, got %+v", task.SVNConfig)
+	}
+}
+
 func TestCacheRoundTripWithTaskLink(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "reposync.db")
 	db, err := New(dbPath, security.NewSecretBox("test-secret"))
