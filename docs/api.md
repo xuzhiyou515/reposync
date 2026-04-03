@@ -142,3 +142,55 @@
   }
 }
 ```
+
+## 9. Current `svn_import` payload
+
+The example above reflects an early planning shape. The current implementation uses the normal task fields directly:
+
+- `sourceRepoUrl` is the SVN source address and supports `http://`, `https://`, and `svn://`
+- `targetRepoUrl` is the Git destination and may use HTTP or SSH
+- `svnConfig` currently supports:
+  - `trunkPath`
+  - `branchesPath`
+  - `tagsPath`
+  - `startRevision`
+  - `authorsFilePath`
+  - `authorDomain`
+
+Current example:
+
+```json
+{
+  "taskType": "svn_import",
+  "name": "UICore",
+  "sourceRepoUrl": "svn://svn.example.com/repos/project",
+  "targetRepoUrl": "ssh://git@gogs.example.com:2222/mirror/uicore.git",
+  "enabled": true,
+  "triggerConfig": {
+    "cron": "0 */30 * * * *",
+    "enableSchedule": true,
+    "enableWebhook": false,
+    "branchReference": ""
+  },
+  "providerConfig": {
+    "provider": "gogs",
+    "namespace": "mirror",
+    "visibility": "private",
+    "baseApiUrl": "http://gogs.example.com:3000/api/v1"
+  },
+  "svnConfig": {
+    "trunkPath": ".",
+    "branchesPath": "",
+    "tagsPath": "",
+    "startRevision": "120000",
+    "authorsFilePath": "",
+    "authorDomain": "@example.com"
+  }
+}
+```
+
+Notes:
+
+- `startRevision` is optional and only affects the initial `git svn clone` for a fresh cache
+- when `targetRepoUrl` uses SSH, `providerConfig.baseApiUrl` must be set explicitly for repository existence checks and auto-create
+- when `authorsFilePath` is empty, RepoSync auto-maps SVN authors to `name <name@domain>`

@@ -77,6 +77,7 @@ const emptyTask = (): Partial<SyncTask> => ({
     trunkPath: 'trunk',
     branchesPath: 'branches',
     tagsPath: 'tags',
+    startRevision: '',
     authorsFilePath: '',
     authorDomain: '',
   },
@@ -331,6 +332,10 @@ const selectedExecutionStats = computed(() => {
         value: formatSVNLayoutSummary(task.svnConfig),
       },
       {
+        label: '起始 Revision',
+        value: task.svnConfig.startRevision || '全量历史',
+      },
+      {
         label: '作者映射',
         value: task.svnConfig.authorsFilePath ? 'authors.txt' : `自动映射到 <author>${task.svnConfig.authorDomain || '@svn.local'}`,
       },
@@ -355,6 +360,7 @@ const selectedExecutionConfigRows = computed(() => {
       { label: 'Trunk', value: formatSVNLayoutValue(task.svnConfig.trunkPath, 'trunk') },
       { label: 'Branches', value: formatSVNLayoutValue(task.svnConfig.branchesPath, 'branches') },
       { label: 'Tags', value: formatSVNLayoutValue(task.svnConfig.tagsPath, 'tags') },
+      { label: '起始 Revision', value: task.svnConfig.startRevision || '全量历史' },
       {
         label: '作者映射',
         value: task.svnConfig.authorsFilePath || `自动映射到 <author>${task.svnConfig.authorDomain || '@svn.local'}`,
@@ -646,6 +652,7 @@ const editTask = (task: SyncTask) => {
     trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
     branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
     tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+    startRevision: taskForm.svnConfig?.startRevision ?? '',
     authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
     authorDomain: taskForm.svnConfig?.authorDomain ?? '',
   }
@@ -718,6 +725,7 @@ watch(
         trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
         branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
         tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+        startRevision: taskForm.svnConfig?.startRevision ?? '',
         authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
         authorDomain: taskForm.svnConfig?.authorDomain ?? '',
       }
@@ -727,6 +735,7 @@ watch(
       trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
       branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
       tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+      startRevision: taskForm.svnConfig?.startRevision ?? '',
       authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
       authorDomain: taskForm.svnConfig?.authorDomain ?? '',
     }
@@ -1594,14 +1603,19 @@ onBeforeUnmount(() => {
                 <el-input v-model="taskForm.svnConfig!.branchesPath" placeholder="标准布局填 branches；无分支可留空" />
               </el-form-item>
             </div>
-            <div class="two-column form-grid-wide">
-              <el-form-item label="Tags 路径">
-                <el-input v-model="taskForm.svnConfig!.tagsPath" placeholder="标准布局填 tags；无标签可留空" />
-              </el-form-item>
-              <el-form-item label="authors.txt 文件">
-                <el-input v-model="taskForm.svnConfig!.authorsFilePath" placeholder="可选，本地文件路径" />
-              </el-form-item>
-            </div>
+              <div class="two-column form-grid-wide">
+                <el-form-item label="Tags 路径">
+                  <el-input v-model="taskForm.svnConfig!.tagsPath" placeholder="标准布局填 tags；无标签可留空" />
+                </el-form-item>
+                <el-form-item label="起始 Revision">
+                  <el-input v-model="taskForm.svnConfig!.startRevision" placeholder="可选，例如 120000；留空表示全量历史" />
+                </el-form-item>
+              </div>
+              <div class="two-column form-grid-wide">
+                <el-form-item label="authors.txt 文件">
+                  <el-input v-model="taskForm.svnConfig!.authorsFilePath" placeholder="可选，本地文件路径" />
+                </el-form-item>
+              </div>
             <div class="two-column form-grid-wide">
               <el-form-item label="邮箱后缀">
                 <el-input v-model="taskForm.svnConfig!.authorDomain" placeholder="例如：@company.com，留空时默认使用 @svn.local" />
@@ -1693,7 +1707,7 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item label="API Base URL">
-                <el-input v-model="taskForm.providerConfig!.baseApiUrl" placeholder="Optional" />
+                <el-input v-model="taskForm.providerConfig!.baseApiUrl" placeholder="SSH 目标仓库时必填，例如 http://host:3000/api/v1" />
               </el-form-item>
             </div>
             <el-form-item label="描述模板">

@@ -130,6 +130,21 @@ func TestGogsEnsureRepositoryReturnsPermissionError(t *testing.T) {
 	}
 }
 
+func TestGogsEnsureRepositoryRequiresBaseAPIURLForSSHTarget(t *testing.T) {
+	manager := NewManager()
+	_, _, err := manager.EnsureRepository(context.Background(), "ssh://git.example.com:2222/mirror/demo.git", domain.ProviderConfig{
+		Provider:   domain.ProviderGogs,
+		Namespace:  "mirror",
+		Visibility: domain.VisibilityPrivate,
+	}, &domain.Credential{Type: domain.CredentialTypeAPIToken, Secret: "token"})
+	if err == nil {
+		t.Fatalf("expected base api url validation error")
+	}
+	if !strings.Contains(err.Error(), "baseApiUrl is required") {
+		t.Fatalf("expected explicit base api url error, got %v", err)
+	}
+}
+
 func TestEnsureRepositoryCreatesLocalBareRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is required for local repository initialization")

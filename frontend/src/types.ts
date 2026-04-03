@@ -24,6 +24,7 @@ export interface SVNConfig {
   trunkPath: string
   branchesPath: string
   tagsPath: string
+  startRevision: string
   authorsFilePath: string
   authorDomain: string
 }

@@ -325,6 +325,7 @@ func scanTask(row scanner, withLatest bool) (domain.SyncTask, error) {
 		task.SVNConfig.TrunkPath = strings.TrimSpace(task.SVNConfig.TrunkPath)
 		task.SVNConfig.BranchesPath = strings.TrimSpace(task.SVNConfig.BranchesPath)
 		task.SVNConfig.TagsPath = strings.TrimSpace(task.SVNConfig.TagsPath)
+		task.SVNConfig.StartRevision = strings.TrimSpace(task.SVNConfig.StartRevision)
 		task.SVNConfig.AuthorsFilePath = strings.TrimSpace(task.SVNConfig.AuthorsFilePath)
 		task.SVNConfig.AuthorDomain = strings.TrimSpace(task.SVNConfig.AuthorDomain)
 		if task.SVNConfig.TrunkPath == "" && task.SVNConfig.BranchesPath == "" && task.SVNConfig.TagsPath == "" {
@@ -369,6 +370,7 @@ func (s *Store) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sync
 		task.SVNConfig.TrunkPath = strings.TrimSpace(task.SVNConfig.TrunkPath)
 		task.SVNConfig.BranchesPath = strings.TrimSpace(task.SVNConfig.BranchesPath)
 		task.SVNConfig.TagsPath = strings.TrimSpace(task.SVNConfig.TagsPath)
+		task.SVNConfig.StartRevision = strings.TrimSpace(task.SVNConfig.StartRevision)
 		task.SVNConfig.AuthorsFilePath = strings.TrimSpace(task.SVNConfig.AuthorsFilePath)
 		task.SVNConfig.AuthorDomain = strings.TrimSpace(task.SVNConfig.AuthorDomain)
 		if task.SVNConfig.TrunkPath == "" && task.SVNConfig.BranchesPath == "" && task.SVNConfig.TagsPath == "" {
@@ -758,6 +760,15 @@ INSERT INTO cache_task_links (cache_key, task_id, created_at)
 VALUES (?, ?, ?)
 ON CONFLICT(cache_key, task_id) DO NOTHING`,
 		cacheKey, taskID, timeString(time.Now().UTC()),
+	)
+	return err
+}
+
+func (s *Store) UnlinkCacheFromTask(ctx context.Context, cacheKey string, taskID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM cache_task_links
+WHERE cache_key = ? AND task_id = ?`,
+		cacheKey, taskID,
 	)
 	return err
 }

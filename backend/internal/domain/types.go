@@ -75,6 +75,7 @@ type SVNConfig struct {
 	TrunkPath       string `json:"trunkPath"`
 	BranchesPath    string `json:"branchesPath"`
 	TagsPath        string `json:"tagsPath"`
+	StartRevision   string `json:"startRevision"`
 	AuthorsFilePath string `json:"authorsFilePath"`
 	AuthorDomain    string `json:"authorDomain"`
 }

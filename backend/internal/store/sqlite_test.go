@@ -157,6 +157,7 @@ func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
 			Visibility: domain.VisibilityPrivate,
 		},
 		SVNConfig: domain.SVNConfig{
+			StartRevision:   "120000",
 			AuthorsFilePath: "/tmp/authors.txt",
 			AuthorDomain:    "svn.example.com",
 		},
@@ -172,6 +173,9 @@ func TestTaskRoundTripWithSVNImportConfig(t *testing.T) {
 	}
 	if task.SVNConfig.AuthorsFilePath != "/tmp/authors.txt" {
 		t.Fatalf("expected authors file path to round trip, got %q", task.SVNConfig.AuthorsFilePath)
+	}
+	if task.SVNConfig.StartRevision != "120000" {
+		t.Fatalf("expected start revision to round trip, got %q", task.SVNConfig.StartRevision)
 	}
 	if task.SVNConfig.AuthorDomain != "svn.example.com" {
 		t.Fatalf("expected author domain to round trip, got %q", task.SVNConfig.AuthorDomain)
@@ -199,10 +203,11 @@ func TestTaskRoundTripWithSVNSingleDirectoryLayout(t *testing.T) {
 			Visibility: domain.VisibilityPrivate,
 		},
 		SVNConfig: domain.SVNConfig{
-			TrunkPath:    ".",
-			BranchesPath: "",
-			TagsPath:     "",
-			AuthorDomain: "svn.example.com",
+			TrunkPath:     ".",
+			BranchesPath:  "",
+			TagsPath:      "",
+			StartRevision: "4500",
+			AuthorDomain:  "svn.example.com",
 		},
 	})
 	if err != nil {
@@ -210,6 +215,9 @@ func TestTaskRoundTripWithSVNSingleDirectoryLayout(t *testing.T) {
 	}
 	if task.SVNConfig.TrunkPath != "." || task.SVNConfig.BranchesPath != "" || task.SVNConfig.TagsPath != "" {
 		t.Fatalf("expected single-directory layout to round trip, got %+v", task.SVNConfig)
+	}
+	if task.SVNConfig.StartRevision != "4500" {
+		t.Fatalf("expected start revision to round trip, got %q", task.SVNConfig.StartRevision)
 	}
 }
 
@@ -252,5 +260,43 @@ func TestCacheRoundTripWithTaskLink(t *testing.T) {
 	}
 	if len(links) != 2 || links[0] != taskID || links[1] != anotherTaskID {
 		t.Fatalf("expected task link to round trip, got %+v", links)
+	}
+}
+
+func TestUnlinkCacheFromTaskRemovesSpecificLink(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reposync.db")
+	db, err := New(dbPath, security.NewSecretBox("test-secret"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.UpsertCache(ctx, domain.RepoCache{
+		CacheKey:      "cache-key",
+		SourceRepoURL: "src",
+		AuthContext:   "managed",
+		CachePath:     "/tmp/cache-key.git",
+		HealthStatus:  "ready",
+	}); err != nil {
+		t.Fatalf("upsert cache: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, "cache-key", 7); err != nil {
+		t.Fatalf("link first task: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, "cache-key", 8); err != nil {
+		t.Fatalf("link second task: %v", err)
+	}
+
+	if err := db.UnlinkCacheFromTask(ctx, "cache-key", 7); err != nil {
+		t.Fatalf("unlink task: %v", err)
+	}
+
+	links, err := db.ListCacheTaskIDs(ctx, "cache-key")
+	if err != nil {
+		t.Fatalf("list cache task ids: %v", err)
+	}
+	if len(links) != 1 || links[0] != 8 {
+		t.Fatalf("expected only task 8 to remain linked, got %+v", links)
 	}
 }

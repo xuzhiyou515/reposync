@@ -221,3 +221,24 @@
 ### Documentation refresh
 - Updated the top-level `README.md` to describe both `Git -> Git` mirror sync and `SVN -> Git` import capabilities.
 - Rewrote `docs/README.md` so it reflects the current codebase status instead of the initial scaffold phase, and fixed the broken progress document link.
+
+## 2026-04-03 Incremental Update (1)
+
+### SVN import flexibility and cache identity
+- Added `svnConfig.startRevision` so `svn_import` can start from a specific positive SVN revision when a fresh `git svn` cache is created.
+- Extended SVN cache-key derivation to include layout and `startRevision`, preventing different import shapes from reusing the same root cache.
+- Added task validation so invalid `startRevision` values fail fast at save time.
+- Updated the task editor and execution detail view to surface the configured start revision.
+
+## 2026-04-03 Incremental Update (2)
+
+### SSH target safety and cache link cleanup
+- Added validation so SSH target repository URLs now require an explicit `providerConfig.baseApiUrl` for GitHub/Gogs API operations.
+- SCM providers no longer try to derive REST API bases from SSH remotes; they now return a clear configuration error instead.
+- Saving a task now unlinks the previous root cache when the task's cache key changes, so cache association counts stay accurate after edits such as changing `startRevision`.
+
+## 2026-04-03 Incremental Update (3)
+
+### Automatic SVN author mapping correction
+- Fixed the generated `authors-prog` helper so automatic SVN author mapping now emits standard Git identities in the form `name <name@domain>`.
+- This corrects author display in Git hosting platforms such as Gogs when `authors.txt` is not provided.

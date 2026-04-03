@@ -62,6 +62,9 @@ type gogsProvider struct {
 func (p *githubProvider) EnsureRepository(ctx context.Context, targetRepoURL string, config domain.ProviderConfig, credential *domain.Credential) (bool, time.Duration, error) {
 	apiBase := strings.TrimRight(config.BaseAPIURL, "/")
 	if apiBase == "" {
+		if usesSSHRemote(targetRepoURL) {
+			return false, 0, fmt.Errorf("providerConfig.baseApiUrl is required when targetRepoUrl uses ssh")
+		}
 		apiBase = "https://api.github.com"
 	}
 	owner, repo, err := parseOwnerRepo(targetRepoURL, config.Namespace)
@@ -97,11 +100,11 @@ func (p *githubProvider) EnsureRepository(ctx context.Context, targetRepoURL str
 func (p *gogsProvider) EnsureRepository(ctx context.Context, targetRepoURL string, config domain.ProviderConfig, credential *domain.Credential) (bool, time.Duration, error) {
 	apiBase := strings.TrimRight(config.BaseAPIURL, "/")
 	if apiBase == "" {
-		parsed, err := url.Parse(targetRepoURL)
+		derivedAPIBase, err := deriveGogsAPIBase(targetRepoURL)
 		if err != nil {
 			return false, 0, err
 		}
-		apiBase = parsed.Scheme + "://" + parsed.Host + "/api/v1"
+		apiBase = derivedAPIBase
 	}
 	owner, repo, err := parseOwnerRepo(targetRepoURL, config.Namespace)
 	if err != nil {
@@ -240,6 +243,25 @@ func isLocalGitTarget(target string) bool {
 		return false
 	}
 	return true
+}
+
+func deriveGogsAPIBase(targetRepoURL string) (string, error) {
+	if usesSSHRemote(targetRepoURL) {
+		return "", fmt.Errorf("providerConfig.baseApiUrl is required when targetRepoUrl uses ssh")
+	}
+	parsed, err := url.Parse(targetRepoURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid target repository url: %s", targetRepoURL)
+	}
+	return parsed.Scheme + "://" + parsed.Host + "/api/v1", nil
+}
+
+func usesSSHRemote(targetRepoURL string) bool {
+	trimmed := strings.TrimSpace(targetRepoURL)
+	return strings.HasPrefix(trimmed, "git@") || strings.HasPrefix(trimmed, "ssh://")
 }
 
 func existsTargetRepo(target string) bool {

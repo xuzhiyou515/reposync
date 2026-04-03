@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +42,32 @@ func (s *Service) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sy
 	if err := s.validateTask(ctx, task); err != nil {
 		return domain.SyncTask{}, err
 	}
-	return s.store.SaveTask(ctx, task)
+
+	var previousTask *domain.SyncTask
+	if task.ID != 0 {
+		existing, err := s.store.GetTask(ctx, task.ID)
+		if err != nil && err != sql.ErrNoRows {
+			return domain.SyncTask{}, err
+		}
+		if err == nil {
+			previousTask = &existing
+		}
+	}
+
+	saved, err := s.store.SaveTask(ctx, task)
+	if err != nil {
+		return domain.SyncTask{}, err
+	}
+	if previousTask != nil {
+		oldCacheKey := buildCacheKey(previousTask.TaskType, previousTask.SourceRepoURL, previousTask.TargetRepoURL, previousTask.SVNConfig)
+		newCacheKey := buildCacheKey(saved.TaskType, saved.SourceRepoURL, saved.TargetRepoURL, saved.SVNConfig)
+		if oldCacheKey != newCacheKey {
+			if unlinkErr := s.store.UnlinkCacheFromTask(ctx, oldCacheKey, saved.ID); unlinkErr != nil {
+				return domain.SyncTask{}, unlinkErr
+			}
+		}
+	}
+	return saved, nil
 }
 
 func normalizeTask(task domain.SyncTask) domain.SyncTask {
@@ -55,6 +81,7 @@ func normalizeTask(task domain.SyncTask) domain.SyncTask {
 		task.SVNConfig.TrunkPath = strings.TrimSpace(task.SVNConfig.TrunkPath)
 		task.SVNConfig.BranchesPath = strings.TrimSpace(task.SVNConfig.BranchesPath)
 		task.SVNConfig.TagsPath = strings.TrimSpace(task.SVNConfig.TagsPath)
+		task.SVNConfig.StartRevision = strings.TrimSpace(task.SVNConfig.StartRevision)
 		task.SVNConfig.AuthorsFilePath = strings.TrimSpace(task.SVNConfig.AuthorsFilePath)
 		task.SVNConfig.AuthorDomain = strings.TrimSpace(task.SVNConfig.AuthorDomain)
 		if task.SVNConfig.TrunkPath == "" && task.SVNConfig.BranchesPath == "" && task.SVNConfig.TagsPath == "" {
@@ -78,9 +105,15 @@ func (s *Service) validateTask(ctx context.Context, task domain.SyncTask) error 
 	default:
 		return fmt.Errorf("unsupported submoduleRewriteProtocol %q", task.SubmoduleRewriteProtocol)
 	}
+	if strings.TrimSpace(task.ProviderConfig.BaseAPIURL) == "" && isSSHRepoURL(task.TargetRepoURL) {
+		return fmt.Errorf("providerConfig.baseApiUrl is required when targetRepoUrl uses ssh")
+	}
 	if task.TaskType == domain.TaskTypeSVNImport {
 		if !isSupportedSVNRepoURL(task.SourceRepoURL) {
 			return fmt.Errorf("svn_import sourceRepoUrl must use http/https/svn")
+		}
+		if _, err := parseSVNStartRevision(task.SVNConfig.StartRevision); err != nil {
+			return err
 		}
 		if task.RecursiveSubmodules {
 			return fmt.Errorf("svn_import does not support recursiveSubmodules")
@@ -110,6 +143,18 @@ func (s *Service) validateTask(ctx context.Context, task domain.SyncTask) error 
 	return nil
 }
 
+func parseSVNStartRevision(raw string) (int64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	revision, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || revision <= 0 {
+		return 0, fmt.Errorf("svn_import startRevision must be a positive integer")
+	}
+	return revision, nil
+}
+
 func isHTTPRepoURL(raw string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -121,6 +166,18 @@ func isHTTPRepoURL(raw string) bool {
 	default:
 		return false
 	}
+}
+
+func isSSHRepoURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasPrefix(trimmed, "git@") || strings.HasPrefix(trimmed, "ssh://") {
+		return true
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, "ssh")
 }
 
 func isSupportedSVNRepoURL(raw string) bool {
@@ -388,6 +445,7 @@ func buildCacheKey(taskType domain.TaskType, source, target string, svnConfig ..
 			strings.TrimSpace(config.TrunkPath),
 			strings.TrimSpace(config.BranchesPath),
 			strings.TrimSpace(config.TagsPath),
+			strings.TrimSpace(config.StartRevision),
 		)
 	}
 	sum := sha1.Sum([]byte(strings.Join(parts, "|")))

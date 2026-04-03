@@ -66,12 +66,14 @@ func TestBuildSVNCloneArgsIncludesLayoutAndAuthorsFile(t *testing.T) {
 		TrunkPath:       "proj/trunk",
 		BranchesPath:    "proj/branches",
 		TagsPath:        "proj/tags",
+		StartRevision:   "120000",
 		AuthorsFilePath: "D:/authors.txt",
 	}, []string{"--username=svn-user"}, []string{"--authors-file=D:/authors.txt"})
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
 		"svn clone",
 		"--prefix=svn/",
+		"-r 120000:HEAD",
 		"--trunk=proj/trunk",
 		"--branches=proj/branches",
 		"--tags=proj/tags",
@@ -136,9 +138,10 @@ func TestPrepareSVNAuthSupportsSVNProtocol(t *testing.T) {
 
 func TestBuildSVNCloneArgsSupportsSingleDirectoryLayout(t *testing.T) {
 	args := buildSVNCloneArgs("svn://svn.example.com/repos/demo", "D:/cache/demo", domain.SVNConfig{
-		TrunkPath:    ".",
-		BranchesPath: "",
-		TagsPath:     "",
+		TrunkPath:     ".",
+		BranchesPath:  "",
+		TagsPath:      "",
+		StartRevision: "4500",
 	}, []string{"--username=svn-user"}, []string{"--authors-prog=D:/authors.cmd"})
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--trunk=") {
@@ -153,6 +156,7 @@ func TestBuildSVNCloneArgsSupportsSingleDirectoryLayout(t *testing.T) {
 	for _, expected := range []string{
 		"svn clone",
 		"--prefix=svn/",
+		"-r 4500:HEAD",
 		"--username=svn-user",
 		"--authors-prog=D:/authors.cmd",
 	} {
@@ -262,6 +266,24 @@ func TestPrepareSVNAuthorArgsFallsBackToAuthorsProg(t *testing.T) {
 	cleanup()
 	if _, statErr := os.Stat(progPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected authors prog to be removed, got %v", statErr)
+	}
+}
+
+func TestCreateSVNAuthorsProgOutputsGitAuthorIdentity(t *testing.T) {
+	progPath, cleanup, err := createSVNAuthorsProg("@svn.example.com")
+	if err != nil {
+		t.Fatalf("create authors prog: %v", err)
+	}
+	defer cleanup()
+
+	content, err := os.ReadFile(progPath)
+	if err != nil {
+		t.Fatalf("read authors prog: %v", err)
+	}
+	got := string(content)
+	want := `printf '%s <%s@svn.example.com>\n' "$username" "$username"`
+	if !strings.Contains(got, want) {
+		t.Fatalf("expected authors prog to contain %q, got %q", want, got)
 	}
 }
 

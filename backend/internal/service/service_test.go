@@ -48,6 +48,20 @@ func TestBuildCacheKeySeparatesSVNLayouts(t *testing.T) {
 	}
 }
 
+func TestBuildCacheKeySeparatesSVNStartRevision(t *testing.T) {
+	firstKey := buildCacheKey(domain.TaskTypeSVNImport, "source", "target", domain.SVNConfig{
+		TrunkPath:     ".",
+		StartRevision: "120000",
+	})
+	secondKey := buildCacheKey(domain.TaskTypeSVNImport, "source", "target", domain.SVNConfig{
+		TrunkPath:     ".",
+		StartRevision: "130000",
+	})
+	if firstKey == secondKey {
+		t.Fatalf("expected cache keys to differ across svn start revisions")
+	}
+}
+
 func TestMapSubmoduleTargetUsesRepoNameFromGitmodulesURL(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -135,6 +149,41 @@ func TestSaveTaskRejectsUnsupportedSubmoduleRewriteProtocol(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported submoduleRewriteProtocol") {
 		t.Fatalf("expected protocol validation error, got %v", err)
+	}
+}
+
+func TestSaveTaskRejectsSSHGitTargetWithoutBaseAPIURL(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	_, err = svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-ssh-target-without-api",
+		SourceRepoURL: "svn://svn.example.com/repos/project",
+		TargetRepoURL: "ssh://git.example.com:2222/mirror/demo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		SVNConfig: domain.SVNConfig{
+			TrunkPath: ".",
+		},
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGogs,
+			Visibility: domain.VisibilityPrivate,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected save task to fail")
+	}
+	if !strings.Contains(err.Error(), "baseApiUrl is required") {
+		t.Fatalf("expected explicit base api url error, got %v", err)
 	}
 }
 
@@ -435,6 +484,130 @@ func TestSaveTaskPreservesSingleDirectorySVNLayout(t *testing.T) {
 	}
 	if task.SVNConfig.TrunkPath != "." || task.SVNConfig.BranchesPath != "" || task.SVNConfig.TagsPath != "" {
 		t.Fatalf("expected single-directory svn layout to be preserved, got %+v", task.SVNConfig)
+	}
+}
+
+func TestSaveTaskRejectsInvalidSVNStartRevision(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	_, err = svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-invalid-revision",
+		SourceRepoURL: "svn://svn.example.com/repos/project",
+		TargetRepoURL: "https://target.example.com/org/repo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		SVNConfig: domain.SVNConfig{
+			TrunkPath:     ".",
+			StartRevision: "abc",
+		},
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err == nil {
+		t.Fatal("expected save task to fail for invalid start revision")
+	}
+	if !strings.Contains(err.Error(), "startRevision must be a positive integer") {
+		t.Fatalf("expected start revision validation error, got %v", err)
+	}
+}
+
+func TestSaveTaskPreservesSVNStartRevision(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	task, err := svc.SaveTask(context.Background(), domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-start-revision",
+		SourceRepoURL: "svn://svn.example.com/repos/project",
+		TargetRepoURL: "https://target.example.com/org/repo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		SVNConfig: domain.SVNConfig{
+			TrunkPath:     ".",
+			StartRevision: "120000",
+		},
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	if task.SVNConfig.StartRevision != "120000" {
+		t.Fatalf("expected start revision to round trip, got %q", task.SVNConfig.StartRevision)
+	}
+}
+
+func TestSaveTaskUnlinksPreviousRootCacheWhenSVNRevisionChanges(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	ctx := context.Background()
+	task, err := svc.SaveTask(ctx, domain.SyncTask{
+		TaskType:      domain.TaskTypeSVNImport,
+		Name:          "svn-start-revision-link",
+		SourceRepoURL: "svn://svn.example.com/repos/project",
+		TargetRepoURL: "https://target.example.com/org/repo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		SVNConfig: domain.SVNConfig{
+			TrunkPath:     ".",
+			StartRevision: "120000",
+		},
+		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+	})
+	if err != nil {
+		t.Fatalf("save initial task: %v", err)
+	}
+
+	oldCacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL, task.SVNConfig)
+	if err := db.UpsertCache(ctx, domain.RepoCache{
+		CacheKey:      oldCacheKey,
+		SourceRepoURL: task.SourceRepoURL,
+		AuthContext:   "managed",
+		CachePath:     filepath.Join(root, "cache", "old"),
+		HealthStatus:  "ready",
+	}); err != nil {
+		t.Fatalf("upsert old cache: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, oldCacheKey, task.ID); err != nil {
+		t.Fatalf("link old cache: %v", err)
+	}
+
+	task.SVNConfig.StartRevision = "130000"
+	if _, err := svc.SaveTask(ctx, task); err != nil {
+		t.Fatalf("save updated task: %v", err)
+	}
+
+	links, err := db.ListCacheTaskIDs(ctx, oldCacheKey)
+	if err != nil {
+		t.Fatalf("list old cache task ids: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("expected old cache link to be removed, got %+v", links)
 	}
 }
 

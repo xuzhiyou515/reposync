@@ -624,6 +624,9 @@ func buildSVNCloneArgs(sourceURL string, cachePath string, svnConfig domain.SVNC
 		"svn", "clone", sourceURL, cachePath,
 		"--prefix=svn/",
 	}
+	if startRevision := strings.TrimSpace(svnConfig.StartRevision); startRevision != "" {
+		args = append(args, "-r", startRevision+":HEAD")
+	}
 	if !isSVNSingleDirectoryLayout(svnConfig.TrunkPath) {
 		args = append(args, "--trunk="+defaultSVNLayoutPath(svnConfig.TrunkPath, "trunk"))
 	}
@@ -785,7 +788,7 @@ func createSVNAuthorsProg(emailSuffix string) (string, func(), error) {
 		"#!/bin/sh",
 		`username="$1"`,
 		`[ -n "$username" ] || exit 1`,
-		fmt.Sprintf(`printf '%%s = %%s <%%s%s>\n' "$username" "$username" "$username"`, safeSuffix),
+		fmt.Sprintf(`printf '%%s <%%s%s>\n' "$username" "$username"`, safeSuffix),
 		"",
 	}, "\n")
 	if _, err := file.WriteString(content); err != nil {
