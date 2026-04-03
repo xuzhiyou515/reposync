@@ -764,15 +764,6 @@ ON CONFLICT(cache_key, task_id) DO NOTHING`,
 	return err
 }
 
-func (s *Store) UnlinkCacheFromTask(ctx context.Context, cacheKey string, taskID int64) error {
-	_, err := s.db.ExecContext(ctx, `
-DELETE FROM cache_task_links
-WHERE cache_key = ? AND task_id = ?`,
-		cacheKey, taskID,
-	)
-	return err
-}
-
 func (s *Store) ListCacheTaskIDs(ctx context.Context, cacheKey string) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT task_id
@@ -792,6 +783,95 @@ ORDER BY task_id`, cacheKey)
 		result = append(result, taskID)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) ListCacheKeysForTask(ctx context.Context, taskID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT cache_key
+FROM cache_task_links
+WHERE task_id = ?
+ORDER BY cache_key`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var cacheKey string
+		if err := rows.Scan(&cacheKey); err != nil {
+			return nil, err
+		}
+		result = append(result, cacheKey)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListCachesForTask(ctx context.Context, taskID int64) ([]domain.RepoCache, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT rc.id, rc.cache_key, rc.source_repo_url, rc.auth_context, rc.cache_path,
+  COALESCE((SELECT COUNT(*) FROM cache_task_links ctl WHERE ctl.cache_key = rc.cache_key), 0),
+  rc.last_fetch_at, rc.last_used_at, rc.hit_count, rc.size_bytes, rc.health_status, rc.last_error_message
+FROM repo_caches rc
+JOIN cache_task_links ctl ON ctl.cache_key = rc.cache_key
+WHERE ctl.task_id = ?
+ORDER BY rc.last_used_at DESC, rc.id DESC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var caches []domain.RepoCache
+	for rows.Next() {
+		var item domain.RepoCache
+		var lastFetch, lastUsed sql.NullString
+		if err := rows.Scan(&item.ID, &item.CacheKey, &item.SourceRepoURL, &item.AuthContext, &item.CachePath, &item.LinkedTaskCount, &lastFetch, &lastUsed, &item.HitCount, &item.SizeBytes, &item.HealthStatus, &item.LastErrorMessage); err != nil {
+			return nil, err
+		}
+		item.LastFetchAt = parseNullableTime(lastFetch)
+		item.LastUsedAt = parseNullableTime(lastUsed)
+		caches = append(caches, item)
+	}
+	return caches, rows.Err()
+}
+
+func (s *Store) RenameCacheKey(ctx context.Context, fromCacheKey string, toCacheKey string) error {
+	if strings.TrimSpace(fromCacheKey) == "" || strings.TrimSpace(toCacheKey) == "" || fromCacheKey == toCacheKey {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM repo_caches WHERE cache_key = ?`, toCacheKey).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE cache_task_links SET cache_key = ? WHERE cache_key = ?`, toCacheKey, fromCacheKey); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cache_task_links WHERE cache_key = ?`, fromCacheKey); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM repo_caches WHERE cache_key = ?`, fromCacheKey); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE repo_caches SET cache_key = ? WHERE cache_key = ?`, toCacheKey, fromCacheKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE cache_task_links SET cache_key = ? WHERE cache_key = ?`, toCacheKey, fromCacheKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cache_task_links WHERE cache_key = ?`, fromCacheKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GetCacheByKey(ctx context.Context, cacheKey string) (domain.RepoCache, error) {

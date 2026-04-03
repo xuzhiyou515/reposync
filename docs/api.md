@@ -194,3 +194,4 @@ Notes:
 - `startRevision` is optional and only affects the initial `git svn clone` for a fresh cache
 - when `targetRepoUrl` uses SSH, `providerConfig.baseApiUrl` must be set explicitly for repository existence checks and auto-create
 - when `authorsFilePath` is empty, RepoSync auto-maps SVN authors to `name <name@domain>`
+- cache reuse is keyed by normalized source repository identity; equivalent source URLs that differ only by protocol, credentials, query/fragment, casing, or port will reuse the same root cache when the underlying repository identity is unchanged

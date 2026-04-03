@@ -263,7 +263,7 @@ func TestCacheRoundTripWithTaskLink(t *testing.T) {
 	}
 }
 
-func TestUnlinkCacheFromTaskRemovesSpecificLink(t *testing.T) {
+func TestListCachesForTask(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "reposync.db")
 	db, err := New(dbPath, security.NewSecretBox("test-secret"))
 	if err != nil {
@@ -288,15 +288,86 @@ func TestUnlinkCacheFromTaskRemovesSpecificLink(t *testing.T) {
 		t.Fatalf("link second task: %v", err)
 	}
 
-	if err := db.UnlinkCacheFromTask(ctx, "cache-key", 7); err != nil {
-		t.Fatalf("unlink task: %v", err)
+	caches, err := db.ListCachesForTask(ctx, 7)
+	if err != nil {
+		t.Fatalf("list caches for task: %v", err)
+	}
+	if len(caches) != 1 || caches[0].CacheKey != "cache-key" {
+		t.Fatalf("expected task 7 to list cache-key, got %+v", caches)
+	}
+}
+
+func TestListCacheKeysForTask(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reposync.db")
+	db, err := New(dbPath, security.NewSecretBox("test-secret"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	for _, key := range []string{"cache-a", "cache-b"} {
+		if err := db.UpsertCache(ctx, domain.RepoCache{
+			CacheKey:      key,
+			SourceRepoURL: "src",
+			AuthContext:   "managed",
+			CachePath:     "/tmp/" + key + ".git",
+			HealthStatus:  "ready",
+		}); err != nil {
+			t.Fatalf("upsert cache %s: %v", key, err)
+		}
+		if err := db.LinkCacheToTask(ctx, key, 7); err != nil {
+			t.Fatalf("link cache %s: %v", key, err)
+		}
 	}
 
-	links, err := db.ListCacheTaskIDs(ctx, "cache-key")
+	keys, err := db.ListCacheKeysForTask(ctx, 7)
 	if err != nil {
-		t.Fatalf("list cache task ids: %v", err)
+		t.Fatalf("list cache keys for task: %v", err)
 	}
-	if len(links) != 1 || links[0] != 8 {
-		t.Fatalf("expected only task 8 to remain linked, got %+v", links)
+	if len(keys) != 2 || keys[0] != "cache-a" || keys[1] != "cache-b" {
+		t.Fatalf("expected both cache keys, got %+v", keys)
+	}
+}
+
+func TestRenameCacheKeyUpdatesCacheAndLinks(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "reposync.db")
+	db, err := New(dbPath, security.NewSecretBox("test-secret"))
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.UpsertCache(ctx, domain.RepoCache{
+		CacheKey:      "cache-old",
+		SourceRepoURL: "src",
+		AuthContext:   "managed",
+		CachePath:     "/tmp/cache-old.git",
+		HealthStatus:  "ready",
+	}); err != nil {
+		t.Fatalf("upsert old cache: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, "cache-old", 7); err != nil {
+		t.Fatalf("link old cache: %v", err)
+	}
+
+	if err := db.RenameCacheKey(ctx, "cache-old", "cache-new"); err != nil {
+		t.Fatalf("rename cache key: %v", err)
+	}
+
+	keys, err := db.ListCacheKeysForTask(ctx, 7)
+	if err != nil {
+		t.Fatalf("list cache keys: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != "cache-new" {
+		t.Fatalf("expected renamed cache key, got %+v", keys)
+	}
+	cache, err := db.GetCacheByKey(ctx, "cache-new")
+	if err != nil {
+		t.Fatalf("get renamed cache: %v", err)
+	}
+	if cache.CachePath != "/tmp/cache-old.git" {
+		t.Fatalf("expected cache path to stay unchanged, got %q", cache.CachePath)
 	}
 }

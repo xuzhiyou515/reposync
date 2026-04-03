@@ -58,13 +58,13 @@ func (s *Service) SaveTask(ctx context.Context, task domain.SyncTask) (domain.Sy
 	if err != nil {
 		return domain.SyncTask{}, err
 	}
-	if previousTask != nil {
-		oldCacheKey := buildCacheKey(previousTask.TaskType, previousTask.SourceRepoURL, previousTask.TargetRepoURL, previousTask.SVNConfig)
-		newCacheKey := buildCacheKey(saved.TaskType, saved.SourceRepoURL, saved.TargetRepoURL, saved.SVNConfig)
-		if oldCacheKey != newCacheKey {
-			if unlinkErr := s.store.UnlinkCacheFromTask(ctx, oldCacheKey, saved.ID); unlinkErr != nil {
-				return domain.SyncTask{}, unlinkErr
-			}
+	if saved.TaskType == domain.TaskTypeSVNImport {
+		if err := s.reconcileSVNRootCache(ctx, previousTask, saved); err != nil {
+			return domain.SyncTask{}, err
+		}
+	} else {
+		if err := s.reconcileGitMirrorRootCache(ctx, previousTask, saved); err != nil {
+			return domain.SyncTask{}, err
 		}
 	}
 	return saved, nil
@@ -439,17 +439,201 @@ func buildCacheKey(taskType domain.TaskType, source, target string, svnConfig ..
 		taskType = domain.TaskTypeGitMirror
 	}
 	parts := []string{string(taskType), source, target}
+	if taskType == domain.TaskTypeGitMirror {
+		parts = []string{string(taskType), normalizeGitSourceIdentity(source)}
+	}
 	if taskType == domain.TaskTypeSVNImport && len(svnConfig) > 0 {
-		config := svnConfig[0]
-		parts = append(parts,
-			strings.TrimSpace(config.TrunkPath),
-			strings.TrimSpace(config.BranchesPath),
-			strings.TrimSpace(config.TagsPath),
-			strings.TrimSpace(config.StartRevision),
-		)
+		parts = buildSVNCacheIdentityParts(source, svnConfig[0])
 	}
 	sum := sha1.Sum([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
+}
+
+func normalizeGitSourceIdentity(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if isLocalPathTarget(trimmed) {
+		return filepath.Clean(trimmed)
+	}
+	if strings.HasPrefix(trimmed, "git@") {
+		parts := strings.SplitN(trimmed, ":", 2)
+		host := strings.TrimPrefix(parts[0], "git@")
+		pathPart := ""
+		if len(parts) == 2 {
+			pathPart = parts[1]
+		}
+		return normalizeRemoteHostPath(host, pathPart)
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	if parsed.Scheme == "file" {
+		return filepath.Clean(strings.ReplaceAll(parsed.Path, "/", string(filepath.Separator)))
+	}
+	host := parsed.Hostname()
+	path := parsed.Path
+	if host == "" && path == "" {
+		return trimmed
+	}
+	return normalizeRemoteHostPath(host, path)
+}
+
+func isLocalPathTarget(target string) bool {
+	trimmed := strings.TrimSpace(target)
+	if strings.HasPrefix(trimmed, "git@") {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") || strings.HasPrefix(trimmed, "ssh://") || strings.HasPrefix(trimmed, "file://") {
+		return false
+	}
+	return true
+}
+
+func normalizeRemoteHostPath(host string, path string) string {
+	normalizedHost := strings.ToLower(strings.TrimSpace(host))
+	normalizedPath := strings.Trim(strings.ReplaceAll(path, "\\", "/"), "/")
+	normalizedPath = strings.TrimSuffix(normalizedPath, ".git")
+	switch {
+	case normalizedHost != "" && normalizedPath != "":
+		return normalizedHost + "/" + normalizedPath
+	case normalizedHost != "":
+		return normalizedHost
+	default:
+		return normalizedPath
+	}
+}
+
+func buildSVNCacheIdentityParts(source string, config domain.SVNConfig) []string {
+	return []string{
+		string(domain.TaskTypeSVNImport),
+		normalizeSVNSourceIdentity(source),
+		strings.TrimSpace(config.TrunkPath),
+		strings.TrimSpace(config.BranchesPath),
+		strings.TrimSpace(config.TagsPath),
+		strings.TrimSpace(config.StartRevision),
+		strings.TrimSpace(config.AuthorsFilePath),
+		strings.TrimSpace(config.AuthorDomain),
+	}
+}
+
+func normalizeSVNSourceIdentity(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	path := strings.Trim(strings.ReplaceAll(parsed.Path, "\\", "/"), "/")
+	switch {
+	case host != "" && path != "":
+		return host + "/" + path
+	case host != "":
+		return host
+	case path != "":
+		return path
+	default:
+		return trimmed
+	}
+}
+
+func sameSVNCacheIdentity(left, right domain.SyncTask) bool {
+	if left.TaskType != domain.TaskTypeSVNImport || right.TaskType != domain.TaskTypeSVNImport {
+		return false
+	}
+	leftParts := buildSVNCacheIdentityParts(left.SourceRepoURL, left.SVNConfig)
+	rightParts := buildSVNCacheIdentityParts(right.SourceRepoURL, right.SVNConfig)
+	return strings.Join(leftParts, "|") == strings.Join(rightParts, "|")
+}
+
+func sameGitMirrorCacheIdentity(left, right domain.SyncTask) bool {
+	if left.TaskType != domain.TaskTypeGitMirror || right.TaskType != domain.TaskTypeGitMirror {
+		return false
+	}
+	return normalizeGitSourceIdentity(left.SourceRepoURL) == normalizeGitSourceIdentity(right.SourceRepoURL)
+}
+
+func (s *Service) reconcileSVNRootCache(ctx context.Context, previousTask *domain.SyncTask, saved domain.SyncTask) error {
+	currentCacheKey := buildCacheKey(saved.TaskType, saved.SourceRepoURL, saved.TargetRepoURL, saved.SVNConfig)
+	if _, err := s.store.GetCacheByKey(ctx, currentCacheKey); err == nil {
+		return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+
+	if previousTask == nil || !sameSVNCacheIdentity(*previousTask, saved) {
+		return nil
+	}
+
+	linkedCaches, err := s.store.ListCachesForTask(ctx, saved.ID)
+	if err != nil {
+		return err
+	}
+	var candidate *domain.RepoCache
+	for i := range linkedCaches {
+		cache := linkedCaches[i]
+		if normalizeSVNSourceIdentity(cache.SourceRepoURL) != normalizeSVNSourceIdentity(saved.SourceRepoURL) {
+			continue
+		}
+		if candidate == nil || cacheUsedAt(cache).After(cacheUsedAt(*candidate)) {
+			candidate = &cache
+		}
+	}
+	if candidate == nil || candidate.CacheKey == currentCacheKey {
+		return nil
+	}
+	if err := s.store.RenameCacheKey(ctx, candidate.CacheKey, currentCacheKey); err != nil {
+		return err
+	}
+	return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+}
+
+func (s *Service) reconcileGitMirrorRootCache(ctx context.Context, previousTask *domain.SyncTask, saved domain.SyncTask) error {
+	currentCacheKey := buildCacheKey(saved.TaskType, saved.SourceRepoURL, saved.TargetRepoURL, saved.SVNConfig)
+	if _, err := s.store.GetCacheByKey(ctx, currentCacheKey); err == nil {
+		return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	if previousTask == nil || !sameGitMirrorCacheIdentity(*previousTask, saved) {
+		return nil
+	}
+	linkedCaches, err := s.store.ListCachesForTask(ctx, saved.ID)
+	if err != nil {
+		return err
+	}
+	var candidate *domain.RepoCache
+	for i := range linkedCaches {
+		cache := linkedCaches[i]
+		if normalizeGitSourceIdentity(cache.SourceRepoURL) != normalizeGitSourceIdentity(saved.SourceRepoURL) {
+			continue
+		}
+		if candidate == nil || cacheUsedAt(cache).After(cacheUsedAt(*candidate)) {
+			candidate = &cache
+		}
+	}
+	if candidate == nil || candidate.CacheKey == currentCacheKey {
+		return nil
+	}
+	if err := s.store.RenameCacheKey(ctx, candidate.CacheKey, currentCacheKey); err != nil {
+		return err
+	}
+	return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+}
+
+func cacheUsedAt(cache domain.RepoCache) time.Time {
+	if cache.LastUsedAt != nil {
+		return *cache.LastUsedAt
+	}
+	if cache.LastFetchAt != nil {
+		return *cache.LastFetchAt
+	}
+	return time.Time{}
 }
 
 func resolveCacheBase(defaultBase string, taskBase string) string {

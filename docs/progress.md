@@ -235,10 +235,18 @@
 ### SSH target safety and cache link cleanup
 - Added validation so SSH target repository URLs now require an explicit `providerConfig.baseApiUrl` for GitHub/Gogs API operations.
 - SCM providers no longer try to derive REST API bases from SSH remotes; they now return a clear configuration error instead.
-- Saving a task now unlinks the previous root cache when the task's cache key changes, so cache association counts stay accurate after edits such as changing `startRevision`.
+- Saving a task now reconciles root-cache identity without discarding reusable cache data, so compatible historical caches can be retained and reattached instead of being wasted.
 
 ## 2026-04-03 Incremental Update (3)
 
 ### Automatic SVN author mapping correction
 - Fixed the generated `authors-prog` helper so automatic SVN author mapping now emits standard Git identities in the form `name <name@domain>`.
 - This corrects author display in Git hosting platforms such as Gogs when `authors.txt` is not provided.
+
+## 2026-04-03 Incremental Update (4)
+
+### Cache identity normalization
+- `git_mirror` cache identity now follows the normalized source repository identity instead of including the target repository URL, so changing push targets no longer creates unnecessary new caches.
+- `svn_import` cache identity now uses a normalized source repository identity plus layout/start-revision/author-mapping inputs, so protocol and port differences in equivalent source URLs no longer fragment cache reuse.
+- Source identity normalization now ignores protocol, embedded credentials, query/fragment, host casing, `.git` suffixes, and port differences.
+- Saving a task now attempts to reconcile compatible existing root caches onto the current cache key while keeping the original cache directory path intact.

@@ -32,6 +32,23 @@ func TestBuildCacheKeySeparatesTaskTypes(t *testing.T) {
 	}
 }
 
+func TestBuildCacheKeyIgnoresGitMirrorTargetRepoURL(t *testing.T) {
+	left := buildCacheKey(domain.TaskTypeGitMirror, "https://git.example.com/org/repo.git", "https://target-a.example.com/org/repo.git")
+	right := buildCacheKey(domain.TaskTypeGitMirror, "https://git.example.com/org/repo.git", "ssh://git@target-b.example.com:2222/org/repo.git")
+	if left != right {
+		t.Fatalf("expected git_mirror cache key to ignore target repo url")
+	}
+}
+
+func TestBuildCacheKeyIgnoresGitMirrorSourceProtocolDifferences(t *testing.T) {
+	httpsKey := buildCacheKey(domain.TaskTypeGitMirror, "https://git.example.com/org/repo.git", "target-a")
+	sshKey := buildCacheKey(domain.TaskTypeGitMirror, "ssh://git@git.example.com:2222/org/repo.git", "target-b")
+	scpKey := buildCacheKey(domain.TaskTypeGitMirror, "git@git.example.com:org/repo.git", "target-c")
+	if httpsKey != sshKey || sshKey != scpKey {
+		t.Fatalf("expected git_mirror cache key to ignore source protocol differences")
+	}
+}
+
 func TestBuildCacheKeySeparatesSVNLayouts(t *testing.T) {
 	rootLayoutKey := buildCacheKey(domain.TaskTypeSVNImport, "source", "target", domain.SVNConfig{
 		TrunkPath:    ".",
@@ -59,6 +76,55 @@ func TestBuildCacheKeySeparatesSVNStartRevision(t *testing.T) {
 	})
 	if firstKey == secondKey {
 		t.Fatalf("expected cache keys to differ across svn start revisions")
+	}
+}
+
+func TestBuildCacheKeyIgnoresSVNSourceProtocolDifferences(t *testing.T) {
+	httpKey := buildCacheKey(domain.TaskTypeSVNImport, "http://svn.example.com/repos/project", "target-a", domain.SVNConfig{
+		TrunkPath:     ".",
+		StartRevision: "120000",
+	})
+	svnKey := buildCacheKey(domain.TaskTypeSVNImport, "svn://svn.example.com/repos/project", "target-b", domain.SVNConfig{
+		TrunkPath:     ".",
+		StartRevision: "120000",
+	})
+	if httpKey != svnKey {
+		t.Fatalf("expected svn cache key to ignore source protocol differences")
+	}
+}
+
+func TestNormalizeSVNSourceIdentity(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{input: "svn://svn.example.com/repos/project", expected: "svn.example.com/repos/project"},
+		{input: "https://user:pass@svn.example.com/repos/project?x=1#frag", expected: "svn.example.com/repos/project"},
+		{input: "https://svn.example.com:8443/repos/project", expected: "svn.example.com/repos/project"},
+		{input: " svn://SVN.EXAMPLE.COM/repos/project/ ", expected: "svn.example.com/repos/project"},
+	}
+
+	for _, tc := range cases {
+		if got := normalizeSVNSourceIdentity(tc.input); got != tc.expected {
+			t.Fatalf("normalize source identity %q: expected %q, got %q", tc.input, tc.expected, got)
+		}
+	}
+}
+
+func TestNormalizeGitSourceIdentity(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{input: "https://user:pass@git.example.com/org/repo.git?x=1#frag", expected: "git.example.com/org/repo"},
+		{input: "ssh://git@git.example.com:2222/org/repo.git", expected: "git.example.com/org/repo"},
+		{input: "git@git.example.com:org/repo.git", expected: "git.example.com/org/repo"},
+	}
+
+	for _, tc := range cases {
+		if got := normalizeGitSourceIdentity(tc.input); got != tc.expected {
+			t.Fatalf("normalize git source identity %q: expected %q, got %q", tc.input, tc.expected, got)
+		}
 	}
 }
 
@@ -553,7 +619,25 @@ func TestSaveTaskPreservesSVNStartRevision(t *testing.T) {
 	}
 }
 
-func TestSaveTaskUnlinksPreviousRootCacheWhenSVNRevisionChanges(t *testing.T) {
+func TestBuildCacheKeyIgnoresSVNTargetRepoURL(t *testing.T) {
+	root := t.TempDir()
+	_ = root
+	left := buildCacheKey(domain.TaskTypeSVNImport, "svn://svn.example.com/repos/project", "https://target.example.com/org/repo.git", domain.SVNConfig{
+		TrunkPath:     ".",
+		StartRevision: "120000",
+		AuthorDomain:  "@example.com",
+	})
+	right := buildCacheKey(domain.TaskTypeSVNImport, "svn://svn.example.com/repos/project", "ssh://git@example.com:2222/org/repo.git", domain.SVNConfig{
+		TrunkPath:     ".",
+		StartRevision: "120000",
+		AuthorDomain:  "@example.com",
+	})
+	if left != right {
+		t.Fatalf("expected svn cache key to ignore target repo url")
+	}
+}
+
+func TestSaveTaskReconcilesSVNRootCacheKeyWhenIdentityStaysSame(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "reposync.db")
 
@@ -568,46 +652,125 @@ func TestSaveTaskUnlinksPreviousRootCacheWhenSVNRevisionChanges(t *testing.T) {
 	ctx := context.Background()
 	task, err := svc.SaveTask(ctx, domain.SyncTask{
 		TaskType:      domain.TaskTypeSVNImport,
-		Name:          "svn-start-revision-link",
+		Name:          "svn-root-cache-reconcile",
 		SourceRepoURL: "svn://svn.example.com/repos/project",
-		TargetRepoURL: "https://target.example.com/org/repo.git",
+		TargetRepoURL: "https://git.example.com/mirror/demo.git",
 		Enabled:       true,
 		SyncAllRefs:   true,
 		SVNConfig: domain.SVNConfig{
 			TrunkPath:     ".",
-			StartRevision: "120000",
+			StartRevision: "158000",
 		},
-		ProviderConfig: domain.ProviderConfig{Provider: domain.ProviderGitHub, Visibility: domain.VisibilityPrivate},
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGogs,
+			Visibility: domain.VisibilityPrivate,
+			BaseAPIURL: "http://git.example.com:3000/api/v1",
+		},
 	})
 	if err != nil {
 		t.Fatalf("save initial task: %v", err)
 	}
 
-	oldCacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL, task.SVNConfig)
+	legacyCacheKey := "legacy-cache-key"
 	if err := db.UpsertCache(ctx, domain.RepoCache{
-		CacheKey:      oldCacheKey,
+		CacheKey:      legacyCacheKey,
 		SourceRepoURL: task.SourceRepoURL,
 		AuthContext:   "managed",
-		CachePath:     filepath.Join(root, "cache", "old"),
+		CachePath:     filepath.Join(root, "cache", legacyCacheKey),
 		HealthStatus:  "ready",
 	}); err != nil {
-		t.Fatalf("upsert old cache: %v", err)
+		t.Fatalf("upsert cache: %v", err)
 	}
-	if err := db.LinkCacheToTask(ctx, oldCacheKey, task.ID); err != nil {
-		t.Fatalf("link old cache: %v", err)
+	if err := db.LinkCacheToTask(ctx, legacyCacheKey, task.ID); err != nil {
+		t.Fatalf("link cache: %v", err)
 	}
 
-	task.SVNConfig.StartRevision = "130000"
+	task.TargetRepoURL = "ssh://git.example.com:2222/mirror/demo.git"
 	if _, err := svc.SaveTask(ctx, task); err != nil {
-		t.Fatalf("save updated task: %v", err)
+		t.Fatalf("save task again: %v", err)
 	}
 
-	links, err := db.ListCacheTaskIDs(ctx, oldCacheKey)
+	linkedCacheKeys, err := db.ListCacheKeysForTask(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("list old cache task ids: %v", err)
+		t.Fatalf("list cache keys: %v", err)
 	}
-	if len(links) != 0 {
-		t.Fatalf("expected old cache link to be removed, got %+v", links)
+	currentCacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL, task.SVNConfig)
+	foundCurrent := false
+	for _, key := range linkedCacheKeys {
+		if key == currentCacheKey {
+			foundCurrent = true
+			break
+		}
+	}
+	if !foundCurrent {
+		t.Fatalf("expected current cache key %q to be linked, got %+v", currentCacheKey, linkedCacheKeys)
+	}
+	cache, err := db.GetCacheByKey(ctx, currentCacheKey)
+	if err != nil {
+		t.Fatalf("get reconciled cache: %v", err)
+	}
+	if !strings.Contains(cache.CachePath, legacyCacheKey) {
+		t.Fatalf("expected reconciled cache to reuse existing path, got %q", cache.CachePath)
+	}
+}
+
+func TestSaveTaskReconcilesGitMirrorRootCacheKeyWhenIdentityStaysSame(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "reposync.db")
+
+	box := security.NewSecretBox("test-secret")
+	db, err := store.New(dbPath, box)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer db.Close()
+
+	svc := New(db, filepath.Join(root, "cache"), gitclient.NewClient("git"), scm.NewManager())
+	ctx := context.Background()
+	task, err := svc.SaveTask(ctx, domain.SyncTask{
+		TaskType:      domain.TaskTypeGitMirror,
+		Name:          "git-root-cache-reconcile",
+		SourceRepoURL: "https://git.example.com/org/repo.git",
+		TargetRepoURL: "https://target.example.com/mirror/repo.git",
+		Enabled:       true,
+		SyncAllRefs:   true,
+		ProviderConfig: domain.ProviderConfig{
+			Provider:   domain.ProviderGogs,
+			Visibility: domain.VisibilityPrivate,
+			BaseAPIURL: "http://target.example.com:3000/api/v1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save initial task: %v", err)
+	}
+
+	legacyCacheKey := "legacy-git-cache-key"
+	if err := db.UpsertCache(ctx, domain.RepoCache{
+		CacheKey:      legacyCacheKey,
+		SourceRepoURL: task.SourceRepoURL,
+		AuthContext:   "managed",
+		CachePath:     filepath.Join(root, "cache", legacyCacheKey),
+		HealthStatus:  "ready",
+	}); err != nil {
+		t.Fatalf("upsert cache: %v", err)
+	}
+	if err := db.LinkCacheToTask(ctx, legacyCacheKey, task.ID); err != nil {
+		t.Fatalf("link cache: %v", err)
+	}
+
+	task.SourceRepoURL = "git@git.example.com:org/repo.git"
+	task.TargetRepoURL = "ssh://git@target.example.com:2222/mirror/repo.git"
+	if _, err := svc.SaveTask(ctx, task); err != nil {
+		t.Fatalf("save task again: %v", err)
+	}
+
+	currentCacheKey := buildCacheKey(task.TaskType, task.SourceRepoURL, task.TargetRepoURL, task.SVNConfig)
+	cache, err := db.GetCacheByKey(ctx, currentCacheKey)
+	if err != nil {
+		t.Fatalf("get reconciled cache: %v", err)
+	}
+	if !strings.Contains(cache.CachePath, legacyCacheKey) {
+		t.Fatalf("expected reconciled cache to reuse existing path, got %q", cache.CachePath)
 	}
 }
 
