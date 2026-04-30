@@ -764,6 +764,15 @@ ON CONFLICT(cache_key, task_id) DO NOTHING`,
 	return err
 }
 
+func (s *Store) UnlinkCacheFromTask(ctx context.Context, cacheKey string, taskID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM cache_task_links
+WHERE cache_key = ? AND task_id = ?`,
+		cacheKey, taskID,
+	)
+	return err
+}
+
 func (s *Store) ListCacheTaskIDs(ctx context.Context, cacheKey string) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT task_id

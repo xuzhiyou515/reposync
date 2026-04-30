@@ -712,6 +712,13 @@ func TestSaveTaskReconcilesSVNRootCacheKeyWhenIdentityStaysSame(t *testing.T) {
 	if !strings.Contains(cache.CachePath, legacyCacheKey) {
 		t.Fatalf("expected reconciled cache to reuse existing path, got %q", cache.CachePath)
 	}
+	linkedCacheKeys, err = db.ListCacheKeysForTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("list cache keys after reconcile: %v", err)
+	}
+	if len(linkedCacheKeys) != 1 || linkedCacheKeys[0] != currentCacheKey {
+		t.Fatalf("expected only current svn root cache link to remain, got %+v", linkedCacheKeys)
+	}
 }
 
 func TestSaveTaskReconcilesGitMirrorRootCacheKeyWhenIdentityStaysSame(t *testing.T) {
@@ -771,6 +778,13 @@ func TestSaveTaskReconcilesGitMirrorRootCacheKeyWhenIdentityStaysSame(t *testing
 	}
 	if !strings.Contains(cache.CachePath, legacyCacheKey) {
 		t.Fatalf("expected reconciled cache to reuse existing path, got %q", cache.CachePath)
+	}
+	linkedCacheKeys, err := db.ListCacheKeysForTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("list cache keys after reconcile: %v", err)
+	}
+	if len(linkedCacheKeys) != 1 || linkedCacheKeys[0] != currentCacheKey {
+		t.Fatalf("expected only current git root cache link to remain, got %+v", linkedCacheKeys)
 	}
 }
 

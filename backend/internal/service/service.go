@@ -561,7 +561,10 @@ func sameGitMirrorCacheIdentity(left, right domain.SyncTask) bool {
 func (s *Service) reconcileSVNRootCache(ctx context.Context, previousTask *domain.SyncTask, saved domain.SyncTask) error {
 	currentCacheKey := buildCacheKey(saved.TaskType, saved.SourceRepoURL, saved.TargetRepoURL, saved.SVNConfig)
 	if _, err := s.store.GetCacheByKey(ctx, currentCacheKey); err == nil {
-		return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+		if err := s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID); err != nil {
+			return err
+		}
+		return s.pruneRootCacheLinks(ctx, saved.ID, currentCacheKey, normalizeSVNSourceIdentity)
 	} else if err != sql.ErrNoRows {
 		return err
 	}
@@ -585,18 +588,24 @@ func (s *Service) reconcileSVNRootCache(ctx context.Context, previousTask *domai
 		}
 	}
 	if candidate == nil || candidate.CacheKey == currentCacheKey {
-		return nil
+		return s.pruneRootCacheLinks(ctx, saved.ID, currentCacheKey, normalizeSVNSourceIdentity)
 	}
 	if err := s.store.RenameCacheKey(ctx, candidate.CacheKey, currentCacheKey); err != nil {
 		return err
 	}
-	return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+	if err := s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID); err != nil {
+		return err
+	}
+	return s.pruneRootCacheLinks(ctx, saved.ID, currentCacheKey, normalizeSVNSourceIdentity)
 }
 
 func (s *Service) reconcileGitMirrorRootCache(ctx context.Context, previousTask *domain.SyncTask, saved domain.SyncTask) error {
 	currentCacheKey := buildCacheKey(saved.TaskType, saved.SourceRepoURL, saved.TargetRepoURL, saved.SVNConfig)
 	if _, err := s.store.GetCacheByKey(ctx, currentCacheKey); err == nil {
-		return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+		if err := s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID); err != nil {
+			return err
+		}
+		return s.pruneRootCacheLinks(ctx, saved.ID, currentCacheKey, normalizeGitSourceIdentity)
 	} else if err != sql.ErrNoRows {
 		return err
 	}
@@ -618,12 +627,48 @@ func (s *Service) reconcileGitMirrorRootCache(ctx context.Context, previousTask 
 		}
 	}
 	if candidate == nil || candidate.CacheKey == currentCacheKey {
-		return nil
+		return s.pruneRootCacheLinks(ctx, saved.ID, currentCacheKey, normalizeGitSourceIdentity)
 	}
 	if err := s.store.RenameCacheKey(ctx, candidate.CacheKey, currentCacheKey); err != nil {
 		return err
 	}
-	return s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID)
+	if err := s.store.LinkCacheToTask(ctx, currentCacheKey, saved.ID); err != nil {
+		return err
+	}
+	return s.pruneRootCacheLinks(ctx, saved.ID, currentCacheKey, normalizeGitSourceIdentity)
+}
+
+func (s *Service) pruneRootCacheLinks(ctx context.Context, taskID int64, currentCacheKey string, normalizeSource func(string) string) error {
+	linkedCaches, err := s.store.ListCachesForTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	var currentSourceIdentity string
+	for _, cache := range linkedCaches {
+		if cache.CacheKey == currentCacheKey {
+			currentSourceIdentity = normalizeSource(cache.SourceRepoURL)
+			break
+		}
+	}
+	if currentSourceIdentity == "" {
+		cache, err := s.store.GetCacheByKey(ctx, currentCacheKey)
+		if err != nil {
+			return err
+		}
+		currentSourceIdentity = normalizeSource(cache.SourceRepoURL)
+	}
+	for _, cache := range linkedCaches {
+		if cache.CacheKey == currentCacheKey {
+			continue
+		}
+		if normalizeSource(cache.SourceRepoURL) != currentSourceIdentity {
+			continue
+		}
+		if err := s.store.UnlinkCacheFromTask(ctx, cache.CacheKey, taskID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cacheUsedAt(cache domain.RepoCache) time.Time {
