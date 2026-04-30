@@ -2,6 +2,7 @@
 import axios from 'axios'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { CopyDocument } from '@element-plus/icons-vue'
 import type { ElTree } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '../api'
@@ -626,6 +627,22 @@ const openCreateCredential = () => {
   credentialDialogVisible.value = true
 }
 
+const openTaskFormWith = (task: Partial<SyncTask>) => {
+  resetTaskForm()
+  Object.assign(taskForm, JSON.parse(JSON.stringify(task)))
+  taskForm.taskType = taskForm.taskType || 'git_mirror'
+  taskForm.svnConfig = {
+    trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
+    branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
+    tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
+    startRevision: taskForm.svnConfig?.startRevision ?? '',
+    authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
+    authorDomain: taskForm.svnConfig?.authorDomain ?? '',
+  }
+  taskDialogVisible.value = true
+  void nextTick(() => taskFormRef.value?.clearValidate())
+}
+
 const saveTask = async () => {
   const valid = await taskFormRef.value?.validate().catch(() => false)
   if (!valid) {
@@ -645,19 +662,27 @@ const saveTask = async () => {
 }
 
 const editTask = (task: SyncTask) => {
-  resetTaskForm()
-  Object.assign(taskForm, JSON.parse(JSON.stringify(task)))
-  taskForm.taskType = taskForm.taskType || 'git_mirror'
-  taskForm.svnConfig = {
-    trunkPath: coalesceLayoutValue(taskForm.svnConfig?.trunkPath, 'trunk'),
-    branchesPath: coalesceLayoutValue(taskForm.svnConfig?.branchesPath, 'branches'),
-    tagsPath: coalesceLayoutValue(taskForm.svnConfig?.tagsPath, 'tags'),
-    startRevision: taskForm.svnConfig?.startRevision ?? '',
-    authorsFilePath: taskForm.svnConfig?.authorsFilePath ?? '',
-    authorDomain: taskForm.svnConfig?.authorDomain ?? '',
+  openTaskFormWith(task)
+}
+
+const copyTask = (task: SyncTask) => {
+  const copiedTask = JSON.parse(JSON.stringify(task)) as Partial<SyncTask> & Record<string, unknown>
+  const derivedFields = [
+    'id',
+    'scheduleCron',
+    'nextRunAt',
+    'lastExecutionId',
+    'lastExecutionStatus',
+    'lastExecutionAt',
+    'lastExecutionRepoCount',
+    'lastCreatedRepoCount',
+    'createdAt',
+    'updatedAt',
+  ]
+  for (const field of derivedFields) {
+    delete copiedTask[field]
   }
-  taskDialogVisible.value = true
-  void nextTick(() => taskFormRef.value?.clearValidate())
+  openTaskFormWith(copiedTask)
 }
 
 const removeTask = async (task: SyncTask) => {
@@ -1240,10 +1265,11 @@ onBeforeUnmount(() => {
                     {{ row.lastExecutionRepoCount || 0 }}
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="280" align="center">
+                <el-table-column label="操作" width="340" align="center">
                   <template #default="{ row }">
                     <div class="action-row action-row-inline">
                       <el-button size="small" @click="editTask(row)">编辑</el-button>
+                      <el-button size="small" :icon="CopyDocument" @click="copyTask(row)">复制</el-button>
                       <el-button size="small" type="primary" @click="runTask(row)">执行</el-button>
                       <el-button size="small" @click="openTaskHistory(row.id)">历史</el-button>
                       <el-button size="small" type="danger" @click="removeTask(row)">删除</el-button>
